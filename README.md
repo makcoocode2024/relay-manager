@@ -24,7 +24,7 @@
 ### 安装
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/makcoocode2024/relay-manager.git
 cd relay-manager
 npm install
 ```

@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  syntax-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install
+      - name: Check server.js syntax
+        run: node --check server.js
+      - name: Check index.html JS syntax
+        run: |
+          node -e "
+          const fs = require('fs');
+          const html = fs.readFileSync('index.html', 'utf8');
+          const m = html.match(/<script>([\s\S]*)<\/script>/);
+          if (!m) { console.error('No <script> found'); process.exit(1); }
+          new Function(m[1]);
+          console.log('index.html JS syntax OK');
+          "
+      - name: Verify no secrets committed
+        run: |
+          if git ls-files | grep -qE '^(gateway\.json|paths\.json)$'; then
+            echo 'ERROR: gateway.json or paths.json is tracked (contains secrets!)'; exit 1
+          fi
+          echo 'No secret files tracked'
+      - name: Verify node_modules not committed
+        run: |
+          if git ls-files | grep -q '^node_modules/'; then
+            echo 'ERROR: node_modules is tracked'; exit 1
+          fi
+          echo 'node_modules not tracked'
