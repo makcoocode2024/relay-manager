@@ -135,7 +135,10 @@ async function atomicWrite(filePath, content) {
   await fsp.rename(tmp, filePath);
 }
 
-// Backup file with timestamp
+// Keep at most this many timestamped backups per file; older ones are pruned.
+const MAX_BACKUPS_PER_FILE = 20;
+
+// Backup file with timestamp, then prune old backups so the dir can't grow forever.
 async function backupFile(filePath) {
   if (!fs.existsSync(filePath)) return null;
   const dir = path.dirname(filePath);
@@ -145,14 +148,29 @@ async function backupFile(filePath) {
   if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
   const backupPath = path.join(backupDir, `${base}-${timestamp()}${ext}`);
   await fsp.copyFile(filePath, backupPath);
+  await pruneBackups(backupDir, base, ext);
   return backupPath;
+}
+
+// Delete oldest backups for one source file, keeping the newest MAX_BACKUPS_PER_FILE.
+async function pruneBackups(backupDir, base, ext) {
+  try {
+    const prefix = base + '-';
+    const mine = (await fsp.readdir(backupDir))
+      .filter(f => f.startsWith(prefix) && f.endsWith(ext))
+      .sort(); // timestamp format is lexicographically sortable (oldest first)
+    const excess = mine.length - MAX_BACKUPS_PER_FILE;
+    for (let i = 0; i < excess; i++) {
+      await fsp.unlink(path.join(backupDir, mine[i])).catch(() => {});
+    }
+  } catch (e) { /* pruning is best-effort */ }
 }
 
 // ========== READ FUNCTIONS ==========
 
 function readClaudeCode() {
   const obj = readJSON(PATHS.claudeCode);
-  if (!obj || !obj.env) return { authToken: '', baseUrl: '', opusModel: '', sonnetModel: '', haikuModel: '', model: '', reasoningModel: '', subagentModel: '', apiTimeoutMs: '3000000', disableNonessential: '1', attributionHeader: '0', effortLevel: 'high' };
+  if (!obj || !obj.env) return { authToken: '', baseUrl: '', opusModel: '', sonnetModel: '', haikuModel: '', model: '', reasoningModel: '', subagentModel: '', apiTimeoutMs: '3000000', disableNonessential: '1', attributionHeader: '0', effortLevel: 'high', thinkingMode: 'adaptive', thinkingBudget: '10000' };
   return {
     authToken: obj.env.ANTHROPIC_AUTH_TOKEN || '',
     baseUrl: obj.env.ANTHROPIC_BASE_URL || '',
@@ -166,7 +184,20 @@ function readClaudeCode() {
     disableNonessential: obj.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC || '1',
     attributionHeader: obj.env.CLAUDE_CODE_ATTRIBUTION_HEADER || '0',
     effortLevel: obj.env.CLAUDE_CODE_EFFORT_LEVEL || obj.effortLevel || 'high',
+    thinkingMode: deriveThinkingMode(obj.env),
+    thinkingBudget: obj.env.MAX_THINKING_TOKENS || '10000',
   };
+}
+
+// Map the thinking-related env vars back to one of three UI modes.
+//   off      -> thinking disabled (MAX_THINKING_TOKENS=0 / DISABLE_INTERLEAVED_THINKING=1)
+//   fixed    -> a fixed token budget (MAX_THINKING_TOKENS set to a positive number)
+//   adaptive -> let the model/gateway decide (no explicit budget pinned)
+function deriveThinkingMode(env) {
+  const budget = env.MAX_THINKING_TOKENS;
+  if (budget === '0' || env.DISABLE_INTERLEAVED_THINKING === '1') return 'off';
+  if (budget && parseInt(budget) > 0) return 'fixed';
+  return 'adaptive';
 }
 
 function readClaudeDesktop() {
@@ -244,8 +275,18 @@ async function writeClaudeCode(data) {
   const filePath = PATHS.claudeCode;
   let obj = readJSON(filePath) || {};
   if (!obj.env) obj.env = {};
-  obj.env.ANTHROPIC_AUTH_TOKEN = data.authToken || '';
-  obj.env.ANTHROPIC_BASE_URL = data.baseUrl || '';
+
+  // Input normalization: strip trailing slashes from Base URL, trim whitespace
+  // from the key, so third-party gateways that are picky about exact URLs work.
+  const baseUrl = (data.baseUrl || '').trim().replace(/\/+$/, '');
+  const key = (data.authToken || '').trim();
+
+  obj.env.ANTHROPIC_BASE_URL = baseUrl;
+  // Dual auth: set BOTH so the request works whether the gateway expects a
+  // Bearer token (ANTHROPIC_AUTH_TOKEN) or an x-api-key (ANTHROPIC_API_KEY).
+  obj.env.ANTHROPIC_AUTH_TOKEN = key;
+  obj.env.ANTHROPIC_API_KEY = key;
+
   if (data.opusModel) obj.env.ANTHROPIC_DEFAULT_OPUS_MODEL = data.opusModel;
   if (data.sonnetModel) obj.env.ANTHROPIC_DEFAULT_SONNET_MODEL = data.sonnetModel;
   if (data.haikuModel) obj.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = data.haikuModel;
@@ -253,11 +294,51 @@ async function writeClaudeCode(data) {
   if (data.reasoningModel) obj.env.ANTHROPIC_REASONING_MODEL = data.reasoningModel;
   if (data.subagentModel !== undefined) obj.env.CLAUDE_CODE_SUBAGENT_MODEL = data.subagentModel;
   if (data.apiTimeoutMs !== undefined) obj.env.API_TIMEOUT_MS = String(data.apiTimeoutMs);
-  if (data.disableNonessential !== undefined) obj.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = data.disableNonessential ? '1' : '0';
-  if (data.attributionHeader !== undefined) obj.env.CLAUDE_CODE_ATTRIBUTION_HEADER = data.attributionHeader ? '1' : '0';
+  // Note: values may arrive as the strings "0"/"1" (both truthy!), so compare explicitly.
+  const truthy = v => v === true || v === '1' || v === 1;
+  if (data.disableNonessential !== undefined) obj.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = truthy(data.disableNonessential) ? '1' : '0';
+  if (data.attributionHeader !== undefined) obj.env.CLAUDE_CODE_ATTRIBUTION_HEADER = truthy(data.attributionHeader) ? '1' : '0';
   if (data.effortLevel) { obj.effortLevel = data.effortLevel; obj.env.CLAUDE_CODE_EFFORT_LEVEL = data.effortLevel; }
+
+  // Thinking mode — three states to match third-party gateway compatibility.
+  applyThinkingMode(obj.env, data.thinkingMode, data.thinkingBudget);
+
   await backupFile(filePath);
   await atomicWrite(filePath, JSON.stringify(obj, null, 2) + '\n');
+
+  // Also write ~/.claude.json to skip the official login/onboarding wizard,
+  // which otherwise errors out in unsupported regions with a third-party relay.
+  await ensureClaudeOnboardingSkipped();
+}
+
+// Set/clear thinking-related env vars based on the chosen mode.
+function applyThinkingMode(env, mode, budget) {
+  if (mode === undefined) return; // not provided -> leave untouched
+  // Clean slate, then set per mode.
+  delete env.MAX_THINKING_TOKENS;
+  delete env.DISABLE_INTERLEAVED_THINKING;
+  if (mode === 'off') {
+    // Hard-disable: some gateways reject the `thinking` field entirely.
+    env.MAX_THINKING_TOKENS = '0';
+    env.DISABLE_INTERLEAVED_THINKING = '1';
+  } else if (mode === 'fixed') {
+    const b = parseInt(budget);
+    env.MAX_THINKING_TOKENS = String(Number.isFinite(b) && b > 0 ? b : 10000);
+  }
+  // 'adaptive' -> set nothing, let the model/gateway decide.
+}
+
+// Write ~/.claude.json with onboarding/login flags so the CLI doesn't prompt
+// for an Anthropic login (which fails behind third-party relays / in some regions).
+async function ensureClaudeOnboardingSkipped() {
+  const dotClaude = path.join(HOME, '.claude.json');
+  let obj = readJSON(dotClaude) || {};
+  obj.hasCompletedOnboarding = true;
+  if (!obj.numStartups || obj.numStartups < 1) obj.numStartups = 1;
+  // Some CLI versions also key off a stored onboarding version.
+  if (!obj.lastOnboardingVersion) obj.lastOnboardingVersion = '1.0.0';
+  await backupFile(dotClaude);
+  await atomicWrite(dotClaude, JSON.stringify(obj, null, 2) + '\n');
 }
 
 async function writeClaudeDesktop(data) {
@@ -388,13 +469,11 @@ function checkProxyStatus() {
     if (out.includes('verge-mihomo.exe')) processRunning = true;
   } catch (e) { /* not running */ }
 
+  // Synchronous port check via netstat. (A previous version also created a
+  // net.Socket here, but the async connect could never settle before the
+  // synchronous execSync below returned, so it was dead code — removed.)
   let portListening = false;
   try {
-    const sock = new net.Socket();
-    sock.setTimeout(1000);
-    sock.connect(parseInt(port), '127.0.0.1', () => { portListening = true; sock.destroy(); });
-    sock.on('error', () => { sock.destroy(); });
-    // Need to wait synchronously... use a simple approach:
     const result = execSync(`netstat -ano 2>nul | findstr ":${port} " | findstr "LISTENING"`, { encoding: 'utf-8', timeout: 2000 });
     if (result.trim()) portListening = true;
   } catch (e) { portListening = false; }
@@ -610,9 +689,25 @@ function startGatewayServer() {
   const cfg = readGatewayConfig();
   const port = cfg.port || GATEWAY_DEFAULT_PORT;
   const gw = http.createServer((req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', '*');
+    // Same localhost-only posture as the main server: reject non-local Host
+    // headers (DNS-rebinding) and never emit wildcard CORS. The gateway only
+    // listens on 127.0.0.1, and its real client is Claude Desktop (same host).
+    const gwHost = (req.headers.host || '').toLowerCase();
+    if (!/^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(gwHost)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'Forbidden: gateway only accepts local requests' } }));
+      return;
+    }
+    const gwOrigin = req.headers.origin;
+    if (gwOrigin) {
+      let ok = false;
+      try { const h = new URL(gwOrigin).hostname; ok = (h === 'localhost' || h === '127.0.0.1' || h === '::1'); } catch (e) {}
+      if (ok) {
+        res.setHeader('Access-Control-Allow-Origin', gwOrigin);
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', '*');
+      }
+    }
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
     const u = new URL(req.url, 'http://localhost');
@@ -715,6 +810,85 @@ function fetchModelsFromAPI(baseUrl, apiKey) {
   });
 }
 
+// Real end-to-end connectivity test: send an actual POST /v1/messages (the same
+// endpoint Claude Code uses) so we catch gateway problems that /v1/models misses
+// (thinking-field rejection, auth-header mismatch, model-name validation, etc.).
+function testMessageAPI(baseUrl, apiKey, model) {
+  return new Promise((resolve) => {
+    let u;
+    try { u = new URL(baseUrl); } catch (e) { return resolve({ error: 'Base URL 格式无效: ' + baseUrl }); }
+    let apiPath = u.pathname.replace(/\/+$/, '');
+    const messagesUrl = /\/v\d+$/.test(apiPath)
+      ? u.origin + apiPath + '/messages'
+      : u.origin + (apiPath || '') + '/v1/messages';
+    const payload = JSON.stringify({
+      model: model || 'claude-3-5-sonnet-20241022',
+      max_tokens: 16,
+      messages: [{ role: 'user', content: 'ping' }],
+    });
+    const httpModule = u.protocol === 'https:' ? require('https') : require('http');
+    const target = new URL(messagesUrl);
+    const req = httpModule.request({
+      protocol: target.protocol,
+      hostname: target.hostname,
+      port: target.port || (target.protocol === 'https:' ? 443 : 80),
+      path: target.pathname + target.search,
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + apiKey,   // Bearer scheme
+        'x-api-key': apiKey,                    // x-api-key scheme (dual auth)
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+        // Mimic the real Claude Code CLI as closely as possible so relays that
+        // fingerprint the client ("unauthorized client detected") don't reject
+        // the probe with a false negative. These mirror what the Anthropic SDK
+        // (which Claude Code is built on) sends: a claude-cli User-Agent, the
+        // claude-code beta flag, and the x-stainless-* SDK telemetry headers.
+        'User-Agent': 'claude-cli/1.0.0 (external, cli)',
+        'X-App': 'cli',
+        'anthropic-beta': 'claude-code-20250219,fine-grained-tool-streaming-2025-05-14',
+        'anthropic-dangerous-direct-browser-access': 'true',
+        'x-stainless-lang': 'js',
+        'x-stainless-package-version': '0.55.1',
+        'x-stainless-os': process.platform === 'win32' ? 'Windows' : (process.platform === 'darwin' ? 'MacOS' : 'Linux'),
+        'x-stainless-arch': process.arch === 'x64' ? 'x64' : process.arch,
+        'x-stainless-runtime': 'node',
+        'x-stainless-runtime-version': process.versions.node,
+        'x-stainless-retry-count': '0',
+        'x-stainless-timeout': '60',
+        'Accept': 'application/json',
+      },
+      timeout: 20000,
+    }, (res) => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        const code = res.statusCode;
+        let parsed = null;
+        try { parsed = JSON.parse(data); } catch (e) {}
+        if (code >= 200 && code < 300) {
+          return resolve({ success: true, status: code, model: model, sample: (parsed && parsed.content) ? '收到模型回复' : '请求成功' });
+        }
+        const msg = (parsed && parsed.error && (parsed.error.message || parsed.error.type)) || data.slice(0, 300) || ('HTTP ' + code);
+        // Classify common third-party gateway failures into actionable hints.
+        let hint = '';
+        if (/client.*detect|unauthorized client|client.*not.*allow|forbidden client/i.test(msg)) hint = '中转站检测到「非法客户端」——它在校验 User-Agent 等客户端指纹。本测试已模拟 Claude Code 客户端头；若仍失败，多为该中转站限制了非官方调用，请联系中转站确认是否允许 Claude Code 接入，或换一个中转站。';
+        else if (code === 401 || code === 403 || /invalid.*key|unauthor|token/i.test(msg)) hint = 'API Key 无效或认证方式不被接受（已同时尝试 Bearer 和 x-api-key），请检查 Key 是否正确、是否过期或额度用尽';
+        else if (/model/i.test(msg) && /not.*found|invalid|不存在|无权/i.test(msg)) hint = '模型名不被中转站接受，请检查分层模型映射填的名字';
+        else if (/thinking|budget|max_thinking/i.test(msg)) hint = '中转站不兼容 thinking 字段，请把「思考模式」切到「关闭思考」';
+        else if (code === 404) hint = '/v1/messages 接口 404，Base URL 可能错误（注意是否该带 /anthropic 后缀）';
+        else if (code >= 500) hint = '中转站服务端错误，稍后重试或换线路';
+        resolve({ error: msg, status: code, hint });
+      });
+    });
+    req.on('error', (e) => resolve({ error: e.message, hint: /ECONNREFUSED|ENOTFOUND|ETIMEDOUT/i.test(e.message) ? '无法连接，检查地址/网络/代理' : '' }));
+    req.on('timeout', () => { req.destroy(); resolve({ error: '请求超时 (20s)', hint: '中转站响应过慢或网络不通' }); });
+    req.write(payload);
+    req.end();
+  });
+}
+
 // ========== HTTP SERVER ==========
 
 const MIME = {
@@ -730,10 +904,38 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   const method = req.method.toUpperCase();
 
-  // CORS headers
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  // --- Security guard ---
+  // RelayManager is a localhost-only tool that exposes API keys and can kill
+  // processes, so we lock it down on two fronts:
+  //   1. Host header must be localhost/127.0.0.1 — defends against DNS-rebinding
+  //      attacks where an attacker-controlled domain resolves to 127.0.0.1.
+  //   2. No wildcard CORS. Cross-origin requests (e.g. from a malicious web page
+  //      you happen to have open) are rejected — defends against CSRF and key
+  //      exfiltration. Same-origin requests from the UI need no CORS headers.
+  const hostHeader = (req.headers.host || '').toLowerCase();
+  const hostOk = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(hostHeader);
+  if (!hostOk) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Forbidden: RelayManager only accepts local requests' }));
+    return;
+  }
+  const origin = req.headers.origin;
+  if (origin) {
+    let originOk = false;
+    try {
+      const oh = new URL(origin).hostname;
+      originOk = (oh === 'localhost' || oh === '127.0.0.1' || oh === '::1');
+    } catch (e) { originOk = false; }
+    if (!originOk) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Forbidden: cross-origin request rejected' }));
+      return;
+    }
+    // Legitimate same-origin request: echo back the exact origin, never '*'.
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  }
 
   if (method === 'OPTIONS') {
     res.writeHead(204);
@@ -857,6 +1059,22 @@ const server = http.createServer(async (req, res) => {
       const product = restartMatch[1];
       const result = restartApp(product);
       const r = json({ success: true, ...result });
+      res.writeHead(r.code, { 'Content-Type': r.type });
+      res.end(r.body);
+      return;
+    }
+
+    // GET /api/test-message?baseUrl=...&apiKey=...&model=... — real /v1/messages probe
+    if (method === 'GET' && url.pathname === '/api/test-message') {
+      const baseUrl = url.searchParams.get('baseUrl');
+      const apiKey = url.searchParams.get('apiKey');
+      const model = url.searchParams.get('model') || '';
+      if (!baseUrl || !apiKey) {
+        const r = error('Missing baseUrl or apiKey query parameter', 400);
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+      }
+      const result = await testMessageAPI(baseUrl, apiKey, model);
+      const r = json(result);
       res.writeHead(r.code, { 'Content-Type': r.type });
       res.end(r.body);
       return;
@@ -997,7 +1215,18 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
+// Bind to 127.0.0.1 (loopback only), never 0.0.0.0 — this server exposes API
+// keys via /api/state and can kill processes, so it must not be reachable from
+// other devices on the LAN. The relay gateway already binds to 127.0.0.1 too.
+server.on('error', (e) => {
+  if (e.code === 'EADDRINUSE') {
+    console.error(`端口 ${PORT} 已被占用 —— RelayManager 可能已在运行。请先关闭已有实例（双击「停止.bat」），或修改 server.js 顶部的 PORT。`);
+    process.exit(1);
+  }
+  console.error('Server error:', e.message);
+  process.exit(1);
+});
+server.listen(PORT, '127.0.0.1', () => {
   console.log(`RelayManager running at http://localhost:${PORT}`);
   console.log(`Config path: ${PATHS.claudeCode}`);
   console.log(`Clash Verge: ${clashExe} (${fs.existsSync(clashExe) ? 'found' : 'NOT FOUND'})`);

@@ -185,6 +185,31 @@ main { max-width:960px; margin:0 auto; padding:24px 16px; }
     <div class="status-grid" id="status-grid">加载中...</div>
   </div>
 
+  <!-- Relay Connectivity Test Card -->
+  <div class="card">
+    <h2>&#x1f50d; 中转站连通性检测</h2>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:12px;">输入任意中转站的 Base URL 和 API Key，测试连接是否可用，或获取可用模型列表。</p>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Base URL</label>
+        <input type="text" id="test-base-url" placeholder="https://api.example.com">
+      </div>
+      <div class="form-group">
+        <label>API Key</label>
+        <div class="pwd-wrap">
+          <input type="password" id="test-api-key" placeholder="sk-...">
+          <button class="pwd-toggle" onclick="togglePwd('test-api-key',this)">&#x1f441;</button>
+        </div>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+      <button class="btn btn-outline btn-sm" onclick="testRelayConnection()">&#x1f50c; 测试连接</button>
+      <button class="btn btn-outline btn-sm" onclick="testRelayFetchModels()">&#x1f4e6; 获取模型列表</button>
+      <span id="test-status" style="font-size:12px;color:var(--text2);"></span>
+    </div>
+    <div class="model-list" id="test-models-list" style="margin-top:12px;"></div>
+  </div>
+
   <!-- Proxy Control Card -->
   <div class="card">
     <h2>&#x1f310; 代理控制 (Clash Verge)</h2>
@@ -303,19 +328,35 @@ main { max-width:960px; margin:0 auto; padding:24px 16px; }
         <button class="btn btn-outline btn-sm" onclick="unifyCCModels()">&#x1f500; 统一所有模型为 Default</button>
       </div>
     </div>
-    <div class="form-row">
+    <div class="form-row" style="align-items:flex-end;">
       <div class="form-group">
         <label>API Timeout (ms)</label>
         <input type="text" id="cc-timeout" placeholder="3000000">
+      </div>
+      <div class="form-group">
+        <label>思考模式（thinking）</label>
+        <select id="cc-thinking-mode" onchange="onThinkingModeChange()">
+          <option value="adaptive">自适应思考（默认，由模型/网关决定）</option>
+          <option value="fixed">固定预算思考</option>
+          <option value="off">关闭思考（网关不兼容 thinking 时选此）</option>
+        </select>
+      </div>
+      <div class="form-group" id="cc-thinking-budget-wrap" style="display:none;">
+        <label>思考预算 (tokens)</label>
+        <input type="text" id="cc-thinking-budget" placeholder="10000">
       </div>
     </div>
     <div class="check-row" style="margin-bottom:8px;">
       <input type="checkbox" id="cc-disable-nonessential" checked><label for="cc-disable-nonessential">Disable Nonessential Traffic</label>
     </div>
     <div class="check-row" style="margin-bottom:12px;">
-      <input type="checkbox" id="cc-attribution-off"><label for="cc-attribution-off">Disable Attribution Header</label>
+      <input type="checkbox" id="cc-attribution-off"><label for="cc-attribution-off">Disable Attribution Header（避免第三方网关拦截）</label>
     </div>
-    <button class="btn btn-primary" onclick="saveClaudeCode()">&#x1f4be; 保存 Claude Code</button>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+      <button class="btn btn-primary" onclick="saveClaudeCode()">&#x1f4be; 保存 Claude Code</button>
+      <button class="btn btn-outline btn-sm" onclick="testCCMessage()">&#x1f9ea; 真实对话自测（/v1/messages）</button>
+    </div>
+    <div id="cc-test-status" style="font-size:12px;margin-top:8px;"></div>
   </div>
 </section>
 
@@ -660,6 +701,9 @@ function populateAllForms() {
   setVal('cc-haiku-model', cc.haikuModel); setVal('cc-model', cc.model);
   setVal('cc-reasoning-model', cc.reasoningModel); setVal('cc-subagent-model', cc.subagentModel);
   setVal('cc-effort', cc.effortLevel || 'high');
+  setVal('cc-thinking-mode', cc.thinkingMode || 'adaptive');
+  setVal('cc-thinking-budget', cc.thinkingBudget || '10000');
+  onThinkingModeChange();
   setVal('cc-timeout', cc.apiTimeoutMs);
   document.getElementById('cc-disable-nonessential').checked = cc.disableNonessential !== '0';
   document.getElementById('cc-attribution-off').checked = cc.attributionHeader === '0';
@@ -1138,6 +1182,8 @@ async function saveClaudeCode() {
       apiTimeoutMs: getVal('cc-timeout'),
       disableNonessential: document.getElementById('cc-disable-nonessential').checked,
       attributionHeader: document.getElementById('cc-attribution-off').checked ? '0' : '1',
+      thinkingMode: getVal('cc-thinking-mode'),
+      thinkingBudget: getVal('cc-thinking-budget'),
     }
   };
   await api('/api/save', 'POST', data);
@@ -1284,6 +1330,62 @@ loadState();
 loadGateway();
 loadAutostart();
 
+// ========== RELAY CONNECTIVITY TEST ==========
+async function testRelayConnection() {
+  const baseUrl = getVal('test-base-url');
+  const apiKey = getVal('test-api-key');
+  const status = document.getElementById('test-status');
+  if (!baseUrl || !apiKey) {
+    status.innerHTML = '<span style="color:var(--red);">&#x274c; 请填写 Base URL 和 API Key</span>';
+    return;
+  }
+  status.innerHTML = '<span class="loading"></span> 测试中...';
+  try {
+    const params = new URLSearchParams({ baseUrl, apiKey });
+    const res = await fetch('/api/models?' + params);
+    const data = await res.json();
+    if (data.success && data.total > 0) {
+      status.innerHTML = '<span style="color:var(--green);">&#x2705; 连接成功，可用模型 ' + data.total + ' 个</span>';
+    } else if (data.error && /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|fetch failed|reset|bad_response/i.test(data.error)) {
+      status.innerHTML = '<span style="color:var(--red);">&#x274c; 无法连接：' + esc(data.error) + '（检查地址是否正确、是否需要代理）</span>';
+    } else if (data.error && /401|Invalid token|未授权|unauthorized|额度已用完/i.test(data.error)) {
+      status.innerHTML = '<span style="color:var(--yellow);">&#x26a0; 地址可达但 API Key 无效或额度已用完：' + esc(data.error) + '</span>';
+    } else {
+      status.innerHTML = '<span style="color:var(--yellow);">&#x26a0; ' + esc(data.error || '响应异常') + '</span>';
+    }
+    document.getElementById('test-models-list').innerHTML = '';
+  } catch (e) {
+    status.innerHTML = '<span style="color:var(--red);">&#x274c; 请求失败：' + esc(e.message) + '</span>';
+  }
+}
+
+async function testRelayFetchModels() {
+  const baseUrl = getVal('test-base-url');
+  const apiKey = getVal('test-api-key');
+  const status = document.getElementById('test-status');
+  const list = document.getElementById('test-models-list');
+  if (!baseUrl || !apiKey) {
+    status.innerHTML = '<span style="color:var(--red);">&#x274c; 请填写 Base URL 和 API Key</span>';
+    return;
+  }
+  status.innerHTML = '<span class="loading"></span> 获取中...';
+  list.innerHTML = '';
+  try {
+    const params = new URLSearchParams({ baseUrl, apiKey });
+    const res = await fetch('/api/models?' + params);
+    const data = await res.json();
+    if (data.success) {
+      status.innerHTML = '<span style="color:var(--green);">&#x2705; 获取到 ' + data.total + ' 个模型</span>';
+      list.innerHTML = '<h3 style="margin-bottom:8px;">可用模型 (' + data.total + ')</h3>' +
+        data.models.map(m => '<div class="model-item"><span class="model-id">' + esc(String(m.id)) + '</span><span class="model-owner">' + esc(String(m.owned_by||'')) + '</span><button class="copy-btn" onclick="copyToClipboard(\'' + esc(String(m.id)) + '\')" title="复制模型 ID">&#x1f4cb;</button></div>').join('');
+    } else {
+      status.innerHTML = '<span style="color:var(--red);">&#x274c; ' + esc(data.error || '获取失败') + '</span>';
+    }
+  } catch (e) {
+    status.innerHTML = '<span style="color:var(--red);">&#x274c; 请求失败：' + esc(e.message) + '</span>';
+  }
+}
+
 // ========== RELAY GATEWAY ==========
 let gwRoutes = []; // array of {anthropic, backend}
 const GW_DEFAULT_CLAUDE_MODELS = ['claude-sonnet-4-5', 'claude-opus-4-8', 'claude-haiku-4-5', 'claude-sonnet-4-6'];
@@ -1390,6 +1492,40 @@ async function applyGatewayToClaudeDesktop() {
   } catch (e) { toast('应用失败: ' + e.message, 'error'); }
 }
 
+
+// 思考模式切换：仅「固定预算」显示预算输入框
+function onThinkingModeChange() {
+  const mode = getVal('cc-thinking-mode');
+  const wrap = document.getElementById('cc-thinking-budget-wrap');
+  if (wrap) wrap.style.display = (mode === 'fixed') ? '' : 'none';
+}
+
+// 真实对话连通自测：打 /v1/messages，而不是只列模型
+async function testCCMessage() {
+  const baseUrl = getVal('cc-base-url');
+  const apiKey = getVal('cc-api-key');
+  const model = getVal('cc-sonnet-model') || getVal('cc-model') || '';
+  const status = document.getElementById('cc-test-status');
+  if (!baseUrl || !apiKey) {
+    status.innerHTML = '<span style="color:var(--red);">&#x274c; 请先填写 Base URL 和 API Key</span>';
+    return;
+  }
+  status.innerHTML = '<span class="loading"></span> 正在发起真实对话请求...';
+  try {
+    const params = new URLSearchParams({ baseUrl, apiKey, model });
+    const res = await fetch('/api/test-message?' + params);
+    const data = await res.json();
+    if (data.success) {
+      status.innerHTML = '<span style="color:var(--green);">&#x2705; 对话调用成功（HTTP ' + data.status + '，模型 ' + esc(data.model || '默认') + '）—— Claude Code 可正常使用此中转站</span>';
+    } else {
+      let html = '<span style="color:var(--red);">&#x274c; 调用失败' + (data.status ? '（HTTP ' + data.status + '）' : '') + '：' + esc(data.error || '未知错误') + '</span>';
+      if (data.hint) html += '<br><span style="color:var(--yellow);">&#x1f4a1; 排查方向：' + esc(data.hint) + '</span>';
+      status.innerHTML = html;
+    }
+  } catch (e) {
+    status.innerHTML = '<span style="color:var(--red);">&#x274c; 请求失败：' + esc(e.message) + '</span>';
+  }
+}
 </script>
 </body>
 </html>

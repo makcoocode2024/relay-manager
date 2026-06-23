@@ -1,14 +1,16 @@
 {
   "name": "relay-manager",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "中转站统一配置工具：为 Claude Code / Claude Desktop / Codex CLI / Codex Desktop 统一设置第三方中转站，并内置模型名改写网关。",
+  "main": "server.js",
   "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
+  "keywords": ["claude", "codex", "relay", "proxy", "gateway"],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "type": "commonjs",
   "dependencies": {
     "@iarna/toml": "^2.2.5"
