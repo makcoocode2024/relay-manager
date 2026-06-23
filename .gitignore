@@ -1,0 +1,20 @@
+# 依赖
+node_modules/
+
+# 含密钥的本地配置（切勿提交！）
+gateway.json
+paths.json
+
+# 日志
+*.log
+server.log
+
+# 备份
+backups/
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

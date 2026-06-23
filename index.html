@@ -1,0 +1,1395 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RelayManager — 中转站配置工具</title>
+<style>
+:root {
+  --bg: #0f1117;
+  --bg2: #1a1d27;
+  --bg3: #242836;
+  --border: #2e3348;
+  --text: #e1e4eb;
+  --text2: #9498a3;
+  --accent: #6c8cff;
+  --accent2: #4a6cf7;
+  --green: #34d399;
+  --red: #f87171;
+  --yellow: #fbbf24;
+  --radius: 8px;
+  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font-family:var(--font); min-height:100vh; }
+header {
+  background:var(--bg2); border-bottom:1px solid var(--border);
+  padding:12px 24px; display:flex; align-items:center; gap:16px;
+  position:sticky; top:0; z-index:100; backdrop-filter:blur(12px);
+}
+header h1 { font-size:18px; font-weight:600; color:var(--accent); white-space:nowrap; }
+.tabs { display:flex; gap:4px; flex-wrap:wrap; }
+.tab {
+  padding:6px 14px; border-radius:6px; cursor:pointer;
+  font-size:13px; color:var(--text2); border:1px solid transparent;
+  transition:all .15s; white-space:nowrap; user-select:none;
+}
+.tab:hover { color:var(--text); background:var(--bg3); }
+.tab.active { color:var(--accent); background:var(--bg3); border-color:var(--accent); }
+main { max-width:960px; margin:0 auto; padding:24px 16px; }
+.tab-panel { display:none; }
+.tab-panel.active { display:block; }
+
+.card { background:var(--bg2); border:1px solid var(--border); border-radius:var(--radius); padding:20px; margin-bottom:20px; }
+.card h2 { font-size:15px; font-weight:600; margin-bottom:16px; color:var(--text); }
+.card h3 { font-size:13px; font-weight:600; color:var(--text2); margin-bottom:8px; }
+
+.form-group { margin-bottom:14px; }
+.form-group label { display:block; font-size:12px; color:var(--text2); margin-bottom:4px; font-weight:500; }
+.form-group input, .form-group select, .form-group textarea {
+  width:100%; padding:8px 12px; background:var(--bg3); border:1px solid var(--border);
+  border-radius:6px; color:var(--text); font-size:13px; font-family:var(--font);
+  outline:none; transition:border-color .15s;
+}
+.form-group input:focus, .form-group select:focus, .form-group textarea:focus { border-color:var(--accent); }
+.form-group textarea { min-height:80px; resize:vertical; }
+.form-row { display:flex; gap:12px; }
+.form-row .form-group { flex:1; }
+
+.pwd-wrap { position:relative; }
+.pwd-wrap input { padding-right:42px; }
+.pwd-toggle { position:absolute; right:8px; top:50%; transform:translateY(-50%); background:none; border:none; color:var(--text2); cursor:pointer; font-size:13px; padding:4px; }
+.pwd-toggle:hover { color:var(--text); }
+
+.btn {
+  padding:8px 18px; border-radius:6px; font-size:13px; font-weight:500; cursor:pointer;
+  border:1px solid transparent; transition:all .15s; font-family:var(--font);
+  display:inline-flex; align-items:center; gap:6px;
+}
+.btn-primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+.btn-primary:hover { background:var(--accent2); }
+.btn-green { background:var(--green); color:#000; }
+.btn-green:hover { opacity:.85; }
+.btn-red { background:transparent; color:var(--red); border-color:var(--red); }
+.btn-red:hover { background:var(--red); color:#fff; }
+.btn-yellow { background:var(--yellow); color:#000; }
+.btn-yellow:hover { opacity:.85; }
+.btn-outline { background:transparent; border-color:var(--border); color:var(--text); }
+.btn-outline:hover { background:var(--bg3); }
+.btn-sm { padding:5px 12px; font-size:12px; }
+.btn-lg { padding:12px 28px; font-size:15px; }
+
+.sync-section { text-align:center; padding:28px; }
+.sync-section h2 { font-size:20px; margin-bottom:20px; }
+.sync-fields { max-width:480px; margin:0 auto 20px; }
+.sync-checks { display:flex; gap:16px; justify-content:center; margin-bottom:16px; flex-wrap:wrap; }
+.sync-checks label { display:flex; align-items:center; gap:4px; font-size:12px; color:var(--text2); cursor:pointer; }
+.sync-checks input[type=checkbox] { accent-color:var(--accent); }
+
+.status-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:12px; }
+.status-card { background:var(--bg3); border-radius:var(--radius); padding:14px; border:1px solid var(--border); }
+.status-card .name { font-size:12px; color:var(--text2); margin-bottom:6px; }
+.status-card .url { font-size:11px; color:var(--accent); word-break:break-all; margin-bottom:4px; }
+.status-card .key { font-size:11px; color:var(--text2); word-break:break-all; }
+.status-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }
+.status-dot.set { background:var(--green); }
+.status-dot.unset { background:var(--red); }
+
+.proxy-status { display:flex; align-items:center; gap:12px; padding:12px 16px; background:var(--bg3); border-radius:var(--radius); margin-bottom:16px; }
+.proxy-status .indicator { width:10px; height:10px; border-radius:50%; }
+.proxy-status .indicator.on { background:var(--green); box-shadow:0 0 8px var(--green); }
+.proxy-status .indicator.off { background:var(--red); }
+.proxy-status .info { font-size:13px; }
+
+.upstream-table { width:100%; border-collapse:collapse; font-size:12px; margin-top:8px; }
+.upstream-table th { text-align:left; padding:8px; color:var(--text2); border-bottom:1px solid var(--border); font-weight:500; }
+.upstream-table td { padding:8px; border-bottom:1px solid var(--border); vertical-align:top; }
+.upstream-table td input { background:var(--bg3); border:1px solid var(--border); color:var(--text); padding:4px 8px; border-radius:4px; font-size:11px; width:100%; }
+.upstream-table td select { background:var(--bg3); border:1px solid var(--border); color:var(--text); padding:4px 8px; border-radius:4px; font-size:11px; }
+.upstream-table .mono { font-family:monospace; font-size:10px; color:var(--accent); word-break:break-all; }
+
+.toast-container { position:fixed; top:16px; right:16px; z-index:999; display:flex; flex-direction:column; gap:8px; }
+.toast { padding:12px 20px; border-radius:var(--radius); font-size:13px; animation:slideIn .25s ease; max-width:380px; }
+.toast.success { background:#065f46; color:#a7f3d0; border:1px solid #059669; }
+.toast.error { background:#7f1d1d; color:#fecaca; border:1px solid #dc2626; }
+@keyframes slideIn { from { transform:translateX(100%);opacity:0; } to { transform:translateX(0);opacity:1; } }
+
+.loading { display:inline-block; width:16px; height:16px; border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .6s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
+
+.check-row { display:flex; align-items:center; gap:8px; }
+.check-row input[type=checkbox] { width:auto; accent-color:var(--accent); }
+
+.tag { display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; background:var(--bg3); color:var(--text2); }
+.tag.active { background:#065f46; color:#a7f3d0; }
+.tag.suspended { background:#7f1d1d; color:#fecaca; }
+
+.model-list { max-height:300px; overflow-y:auto; margin-top:8px; }
+.model-item { display:flex; align-items:center; justify-content:space-between; padding:6px 10px; border-radius:4px; margin-bottom:2px; background:var(--bg3); font-size:12px; }
+.model-item:hover { background:var(--bg); }
+.model-item .model-id { font-family:monospace; color:var(--accent); font-size:11px; flex:1; }
+.model-item .model-owner { color:var(--text2); font-size:10px; margin:0 12px; }
+.model-item .copy-btn { cursor:pointer; color:var(--accent); font-size:11px; border:none; background:none; padding:2px 6px; }
+.model-item .copy-btn:hover { color:var(--text); }
+
+.mapping-row { display:flex; gap:8px; align-items:center; margin-bottom:8px; }
+.mapping-row input { flex:1; }
+.mapping-row span { color:var(--text2); font-size:12px; min-width:20px; text-align:center; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>⚡ RelayManager</h1>
+  <nav class="tabs" id="tabs">
+    <div class="tab active" data-tab="overview">&#x1f4ca; 总览</div>
+    <div class="tab" data-tab="claude-code">Claude Code</div>
+    <div class="tab" data-tab="claude-desktop">Claude Desktop</div>
+    <div class="tab" data-tab="codex-cli">Codex CLI</div>
+    <div class="tab" data-tab="codex-desktop">Codex Desktop</div>
+    <div class="tab" data-tab="models">&#x1f4e6; 模型映射</div>
+    <div class="tab" data-tab="gateway">&#x1f6e3; 中转网关</div>
+  </nav>
+</header>
+
+<main>
+<!-- ============ OVERVIEW TAB ============ -->
+<section class="tab-panel active" id="panel-overview">
+  <div class="card sync-section">
+    <h2>&#x1f504; 一键同步所有产品</h2>
+    <p style="color:var(--text2);font-size:13px;margin-bottom:16px;">设置相同的 Base URL 和 API Key 到所有产品</p>
+    <div class="sync-fields">
+      <div class="form-group">
+        <label>Base URL</label>
+        <input type="text" id="sync-base-url" placeholder="https://api.example.com/v1">
+      </div>
+      <div class="form-group">
+        <label>API Key</label>
+        <div class="pwd-wrap">
+          <input type="password" id="sync-api-key" placeholder="sk-...">
+          <button class="pwd-toggle" onclick="togglePwd('sync-api-key',this)">&#x1f441;</button>
+        </div>
+      </div>
+    </div>
+    <div class="sync-checks">
+      <label><input type="checkbox" checked id="sync-cc"> Claude Code</label>
+      <label><input type="checkbox" checked id="sync-cd"> Claude Desktop</label>
+      <label><input type="checkbox" checked id="sync-cx"> Codex CLI</label>
+      <label><input type="checkbox" checked id="sync-cxd"> Codex Desktop</label>
+    </div>
+    <button class="btn btn-primary btn-lg" onclick="doSyncAll()">&#x26a1; 应用到所有产品</button>
+  </div>
+
+  <div class="card">
+    <h2>&#x1f4ca; 当前配置状态</h2>
+    <div class="status-grid" id="status-grid">加载中...</div>
+  </div>
+
+  <!-- Proxy Control Card -->
+  <div class="card">
+    <h2>&#x1f310; 代理控制 (Clash Verge)</h2>
+    <div class="proxy-status" id="proxy-status-overview">检查中...</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="btn btn-green btn-sm" onclick="proxyStart()">&#x25b6; 启动代理</button>
+      <button class="btn btn-red btn-sm" onclick="proxyStop()">&#x25a0; 停止代理</button>
+      <button class="btn btn-yellow btn-sm" onclick="restartApp('proxy')">&#x21bb; 重启代理</button>
+      <button class="btn btn-outline btn-sm" onclick="proxyRefreshStatus()">&#x21bb; 刷新状态</button>
+    </div>
+  </div>
+
+  <!-- App Restart Card -->
+  <div class="card">
+    <h2>&#x1f504; 重启客户端</h2>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:12px;">配置修改后需要重启客户端才能生效</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;" id="restart-buttons">
+      <button class="btn btn-yellow btn-sm" onclick="restartApp('claude-desktop')">&#x21bb; 重启 Claude Desktop</button>
+      <button class="btn btn-yellow btn-sm" onclick="restartApp('codex-desktop')">&#x21bb; 重启 Codex Desktop</button>
+      <button class="btn btn-yellow btn-sm" onclick="restartApp('proxy')">&#x21bb; 重启 Clash Verge</button>
+    </div>
+    <div id="restart-status" style="font-size:11px;color:var(--text2);margin-top:8px;"></div>
+  </div>
+
+  <!-- App Paths Config Card -->
+  <div class="card">
+    <h2>&#x1f4c2; 应用路径设置</h2>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:12px;">重启功能需要知道各应用的 exe 路径。未自动检测到的（如 Claude Desktop）请手动填写。右键应用快捷方式 → 属性 → 复制「目标」里的路径。</p>
+    <div class="form-group">
+      <label>Claude Desktop exe 路径 <span id="path-status-claude-desktop" style="font-size:11px;"></span></label>
+      <input type="text" id="path-claude-desktop" placeholder="C:\Users\admin\AppData\Local\Claude-3p\Claude.exe">
+    </div>
+    <div class="form-group">
+      <label>Codex Desktop exe 路径 <span id="path-status-codex-desktop" style="font-size:11px;"></span></label>
+      <input type="text" id="path-codex-desktop" placeholder="G:\Program Files\CCX\CCX Desktop\ccx-desktop.exe">
+    </div>
+    <div class="form-group">
+      <label>Clash Verge exe 路径 <span id="path-status-proxy" style="font-size:11px;"></span></label>
+      <input type="text" id="path-proxy" placeholder="C:\Program Files\Clash Verge\Clash Verge.exe">
+    </div>
+    <button class="btn btn-primary btn-sm" onclick="saveAppPaths()">&#x1f4be; 保存路径</button>
+  </div>
+
+  <!-- Auto-start Card -->
+  <div class="card">
+    <h2>&#x1f50a; 开机自启</h2>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:12px;">开机时自动静默启动 RelayManager（含中转网关）。这样 Claude Desktop 开机即可用，无需手动启动。通过 Windows 启动文件夹的 VBS 脚本实现。</p>
+    <div class="check-row" style="margin-bottom:12px;">
+      <input type="checkbox" id="autostart-toggle" onchange="toggleAutostart(this.checked)">
+      <label for="autostart-toggle">开机自动启动 RelayManager</label>
+    </div>
+    <div id="autostart-status" style="font-size:11px;color:var(--text2);"></div>
+  </div>
+</section>
+
+<!-- ============ CLAUDE CODE TAB ============ -->
+<section class="tab-panel" id="panel-claude-code">
+  <div class="card">
+    <h2>Claude Code CLI 配置</h2>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:16px;">修改 <code style="background:var(--bg3);padding:1px 4px;border-radius:3px;">~\.claude\settings.json</code></p>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Base URL <span style="color:var(--yellow);font-size:10px;">(须为 Anthropic 兼容端点，如 …/anthropic，勿用 /v1)</span></label>
+        <input type="text" id="cc-base-url" placeholder="https://api.deepseek.com/anthropic">
+      </div>
+      <div class="form-group">
+        <label>API Key</label>
+        <div class="pwd-wrap">
+          <input type="password" id="cc-api-key" placeholder="sk-...">
+          <button class="pwd-toggle" onclick="togglePwd('cc-api-key',this)">&#x1f441;</button>
+        </div>
+      </div>
+    </div>
+    <div style="background:var(--bg3);border-left:3px solid var(--yellow);padding:8px 12px;border-radius:4px;margin-bottom:14px;font-size:11px;color:var(--text2);">
+      &#x26a0; Claude Code 只发 Anthropic Messages 格式。中转站必须提供 Anthropic 兼容端点（常以 <code>/anthropic</code> 结尾）；若填 OpenAI 的 <code>/v1</code> 端点会超时。模型名可加 <code>[1m]</code> 启用 1M 上下文。
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Default Opus Model</label>
+        <input type="text" id="cc-opus-model" placeholder="deepseek-v4-pro[1m]">
+      </div>
+      <div class="form-group">
+        <label>Default Sonnet Model</label>
+        <input type="text" id="cc-sonnet-model" placeholder="deepseek-v4-pro[1m]">
+      </div>
+      <div class="form-group">
+        <label>Default Haiku Model</label>
+        <input type="text" id="cc-haiku-model" placeholder="deepseek-v4-flash">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Default Model</label>
+        <input type="text" id="cc-model" placeholder="deepseek-v4-pro[1m]">
+      </div>
+      <div class="form-group">
+        <label>Reasoning Model</label>
+        <input type="text" id="cc-reasoning-model" placeholder="deepseek-v4-flash">
+      </div>
+      <div class="form-group">
+        <label>Subagent Model</label>
+        <input type="text" id="cc-subagent-model" placeholder="deepseek-v4-pro[1m]">
+      </div>
+    </div>
+    <div class="form-row" style="align-items:flex-end;">
+      <div class="form-group">
+        <label>Effort Level</label>
+        <select id="cc-effort"><option value="low">low</option><option value="medium">medium</option><option value="high" selected>high</option><option value="max">max</option></select>
+      </div>
+      <div class="form-group" style="flex:0 0 auto;">
+        <label>1M 上下文</label>
+        <div class="check-row"><input type="checkbox" id="cc-1m"><label for="cc-1m">保存时为模型名追加 [1m]</label></div>
+      </div>
+      <div class="form-group" style="flex:0 0 auto;">
+        <label>&nbsp;</label>
+        <button class="btn btn-outline btn-sm" onclick="unifyCCModels()">&#x1f500; 统一所有模型为 Default</button>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>API Timeout (ms)</label>
+        <input type="text" id="cc-timeout" placeholder="3000000">
+      </div>
+    </div>
+    <div class="check-row" style="margin-bottom:8px;">
+      <input type="checkbox" id="cc-disable-nonessential" checked><label for="cc-disable-nonessential">Disable Nonessential Traffic</label>
+    </div>
+    <div class="check-row" style="margin-bottom:12px;">
+      <input type="checkbox" id="cc-attribution-off"><label for="cc-attribution-off">Disable Attribution Header</label>
+    </div>
+    <button class="btn btn-primary" onclick="saveClaudeCode()">&#x1f4be; 保存 Claude Code</button>
+  </div>
+</section>
+
+<!-- ============ CLAUDE DESKTOP TAB ============ -->
+<section class="tab-panel" id="panel-claude-desktop">
+  <div class="card">
+    <h2>Claude Desktop (3P) 配置</h2>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:16px;">修改 <code style="background:var(--bg3);padding:1px 4px;border-radius:3px;">AppData\Local\Claude-3p\configLibrary\&lt;id&gt;.json</code></p>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Base URL</label>
+        <input type="text" id="cd-base-url" placeholder="https://api.futureppo.top">
+      </div>
+      <div class="form-group">
+        <label>API Key</label>
+        <div class="pwd-wrap">
+          <input type="password" id="cd-api-key" placeholder="sk-...">
+          <button class="pwd-toggle" onclick="togglePwd('cd-api-key',this)">&#x1f441;</button>
+        </div>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px;">
+      <button class="btn btn-outline btn-sm" onclick="fillCDFromClaudeCode()">&#x1f4a1; 使用 Claude Code 的中转站</button>
+      <button class="btn btn-outline btn-sm" onclick="testCDConnection()">&#x1f50c; 测试连接</button>
+      <span id="cd-conn-status" style="font-size:12px;color:var(--text2);"></span>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Auth Scheme</label>
+        <input type="text" id="cd-auth-scheme" placeholder="bearer">
+      </div>
+      <div class="form-group">
+        <label>Inference Provider</label>
+        <input type="text" id="cd-provider" placeholder="gateway">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Egress Allowed Hosts (comma-separated)</label>
+      <input type="text" id="cd-egress" placeholder="*">
+    </div>
+    <div class="form-group">
+      <label>模型列表 — Claude Desktop 中显示并发送给网关的模型名</label>
+      <p style="font-size:11px;color:var(--text2);margin-bottom:8px;">每行一个模型，名称即实际调用的模型 ID。先到「模型映射」标签页获取可用模型，再回到这里挑选。</p>
+      <div id="cd-models-list"></div>
+      <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn btn-outline btn-sm" onclick="addCDModel()">+ 添加模型</button>
+        <button class="btn btn-outline btn-sm" onclick="fillCDModelsFromFetched()">&#x1f4e6; 用已获取模型填充</button>
+      </div>
+      <datalist id="cd-model-datalist"></datalist>
+    </div>
+    <button class="btn btn-primary" onclick="saveClaudeDesktop()">&#x1f4be; 保存 Claude Desktop</button>
+    <button class="btn btn-yellow btn-sm" onclick="restartApp('claude-desktop')" style="margin-left:8px;">&#x21bb; 保存后点此重启 Claude Desktop 生效</button>
+  </div>
+</section>
+
+<!-- ============ CODEX CLI TAB ============ -->
+<section class="tab-panel" id="panel-codex-cli">
+  <div class="card">
+    <h2>Codex CLI 配置</h2>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:16px;">修改 <code style="background:var(--bg3);padding:1px 4px;border-radius:3px;">~\.codex\config.toml</code></p>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Base URL</label>
+        <input type="text" id="cx-base-url" placeholder="http://cheap-host1.cheapyun.com:16781/v1">
+      </div>
+      <div class="form-group">
+        <label>API Key (experimental_bearer_token)</label>
+        <div class="pwd-wrap">
+          <input type="password" id="cx-api-key" placeholder="sk-...">
+          <button class="pwd-toggle" onclick="togglePwd('cx-api-key',this)">&#x1f441;</button>
+        </div>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Model</label>
+        <input type="text" id="cx-model" placeholder="gpt-5.5">
+      </div>
+      <div class="form-group">
+        <label>Model Provider</label>
+        <input type="text" id="cx-model-provider" placeholder="custom">
+      </div>
+      <div class="form-group">
+        <label>Provider Name</label>
+        <input type="text" id="cx-provider-name" placeholder="My Codex">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Wire API</label>
+        <select id="cx-wire-api"><option value="responses">responses</option><option value="chat">chat</option></select>
+      </div>
+      <div class="form-group">
+        <label>Reasoning Effort</label>
+        <select id="cx-reasoning"><option value="low">low</option><option value="medium">medium</option><option value="high" selected>high</option><option value="xhigh">xhigh</option></select>
+      </div>
+    </div>
+    <div class="check-row" style="margin-bottom:12px;">
+      <input type="checkbox" id="cx-openai-auth" checked><label for="cx-openai-auth">Requires OpenAI Auth</label>
+    </div>
+    <button class="btn btn-primary" onclick="saveCodexCli()">&#x1f4be; 保存 Codex CLI</button>
+  </div>
+</section>
+
+<!-- ============ CODEX DESKTOP TAB ============ -->
+<section class="tab-panel" id="panel-codex-desktop">
+  <div class="card">
+    <h2>Codex Desktop 注入配置</h2>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:16px;">修改 <code style="background:var(--bg3);padding:1px 4px;border-radius:3px;">agent-config-state\codex.json</code></p>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Injected Base URL</label>
+        <input type="text" id="cxd-injected-url" placeholder="http://127.0.0.1:3688/v1">
+      </div>
+      <div class="form-group">
+        <label>Injected API Key</label>
+        <div class="pwd-wrap">
+          <input type="password" id="cxd-injected-key" placeholder="ccx-...">
+          <button class="pwd-toggle" onclick="togglePwd('cxd-injected-key',this)">&#x1f441;</button>
+        </div>
+      </div>
+    </div>
+    <button class="btn btn-primary" onclick="saveCodexDesktopInjection()" style="margin-bottom:20px;">&#x1f4be; 保存注入配置</button>
+  </div>
+
+  <div class="card">
+    <h2>Codex Desktop 上游配置 (responsesUpstream)</h2>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:8px;">修改 <code style="background:var(--bg3);padding:1px 4px;border-radius:3px;">.config\config.json</code></p>
+    <div id="responses-upstream-table"></div>
+    <button class="btn btn-outline btn-sm" onclick="addUpstream('responses')" style="margin-top:8px;">+ 添加上游</button>
+    <button class="btn btn-primary btn-sm" onclick="saveCodexDesktopUpstream()" style="margin-top:8px;margin-left:8px;">&#x1f4be; 保存上游配置</button>
+  </div>
+</section>
+
+<!-- ============ MODEL MAPPING TAB ============ -->
+<section class="tab-panel" id="panel-models">
+  <div class="card">
+    <h2>&#x1f4e6; 模型映射配置</h2>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:16px;">设置每个客户端使用的中转模型名称映射</p>
+
+    <div class="form-row" style="margin-bottom:20px;">
+      <div class="form-group">
+        <label>从哪个产品读取 API 配置来获取模型</label>
+        <select id="fetch-source">
+          <option value="claude-code">Claude Code 的配置</option>
+          <option value="claude-desktop">Claude Desktop 的配置</option>
+          <option value="codex-cli">Codex CLI 的配置</option>
+          <option value="codex-desktop">Codex Desktop 的配置</option>
+          <option value="custom">自定义 Base URL + Key</option>
+        </select>
+      </div>
+    </div>
+
+    <div id="fetch-custom-fields" style="display:none;">
+      <div class="form-row">
+        <div class="form-group">
+          <label>自定义 Base URL</label>
+          <input type="text" id="fetch-base-url" placeholder="https://api.example.com/v1">
+        </div>
+        <div class="form-group">
+          <label>自定义 API Key</label>
+          <div class="pwd-wrap">
+            <input type="password" id="fetch-api-key" placeholder="sk-...">
+            <button class="pwd-toggle" onclick="togglePwd('fetch-api-key',this)">&#x1f441;</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <button class="btn btn-primary" onclick="fetchModels()">&#x1f50d; 获取可用模型列表</button>
+    <span id="fetch-status" style="font-size:12px;color:var(--text2);margin-left:12px;"></span>
+
+    <div class="model-list" id="model-list" style="margin-top:16px;"></div>
+  </div>
+
+  <!-- Claude Code model mapping -->
+  <div class="card">
+    <h2>Claude Code — 模型映射</h2>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:12px;">设置各个角色使用的模型名称（对应中转站的模型 ID）</p>
+    <div id="mapping-cc"></div>
+    <button class="btn btn-primary btn-sm" onclick="saveMappingCC()">&#x1f4be; 保存 Claude Code 映射</button>
+  </div>
+
+  <!-- Claude Desktop model mapping -->
+  <div class="card">
+    <h2>Claude Desktop — 模型映射</h2>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:12px;">Claude Desktop 的模型列表（inferenceModels）在「Claude Desktop」标签页中以可视化表格编辑。</p>
+    <button class="btn btn-outline btn-sm" onclick="switchTab('claude-desktop')">&#x1f449; 前往 Claude Desktop 标签页编辑模型</button>
+  </div>
+
+  <!-- Codex CLI model mapping -->
+  <div class="card">
+    <h2>Codex CLI — 模型映射</h2>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:12px;">Codex CLI 使用单一模型，设置 model 字段即可</p>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Model</label>
+        <input type="text" id="mapping-cx-model" placeholder="gpt-5.5">
+      </div>
+      <div class="form-group">
+        <label>Reasoning Effort</label>
+        <select id="mapping-cx-effort"><option value="low">low</option><option value="medium">medium</option><option value="high" selected>high</option><option value="xhigh">xhigh</option></select>
+      </div>
+    </div>
+    <button class="btn btn-primary btn-sm" onclick="saveMappingCX()">&#x1f4be; 保存 Codex CLI 映射</button>
+  </div>
+
+  <!-- Codex Desktop model mapping -->
+  <div class="card">
+    <h2>Codex Desktop — 模型映射 (upstream modelMapping)</h2>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:12px;">编辑上游中的 modelMapping 字段（JSON 格式）</p>
+    <div id="mapping-cxd-container"></div>
+    <button class="btn btn-primary btn-sm" onclick="saveMappingCXD()">&#x1f4be; 保存 Codex Desktop 映射</button>
+  </div>
+</section>
+
+<!-- ============ GATEWAY TAB ============ -->
+<section class="tab-panel" id="panel-gateway">
+  <div class="card">
+    <h2>&#x1f6e3; 中转网关（模型名改写代理）</h2>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:12px;">RelayManager 内置一个本地网关，替代 CC Switch 的网关。Claude Desktop 把请求发到本地网关，网关把 Anthropic 模型名（如 <code>claude-sonnet-4-5</code>）改写成后端模型（如 <code>glm-5.2</code>），再转发给真实中转站。这样无需 CC Switch，Claude Desktop 也能用没有 Claude 模型的中转站。</p>
+    <div style="background:var(--bg3);border-left:3px solid var(--accent);padding:8px 12px;border-radius:4px;margin-bottom:14px;font-size:11px;color:var(--text2);">
+      &#x1f4a1; 原理：Claude Desktop → 本地网关（改写模型名）→ 真实中转站。网关随 RelayManager 启动，需保持 RelayManager 运行。
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>上游中转站 URL（真实中转站）</label>
+        <input type="text" id="gw-upstream-url" placeholder="https://api.futureppo.top">
+      </div>
+      <div class="form-group" style="max-width:120px;">
+        <label>网关端口</label>
+        <input type="number" id="gw-port" placeholder="9877" value="9877">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>上游 API Key</label>
+      <div class="pwd-wrap">
+        <input type="password" id="gw-upstream-key" placeholder="sk-...">
+        <button class="pwd-toggle" onclick="togglePwd('gw-upstream-key',this)">&#x1f441;</button>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>模型映射表 — Anthropic 模型名 → 后端模型</label>
+      <p style="font-size:11px;color:var(--text2);margin-bottom:8px;">左栏填 Claude Desktop 要求的 Anthropic 模型名（如 claude-sonnet-4-5），右栏填中转站实际支持的后端模型（如 glm-5.2，可从「模型映射」标签页获取后选）。Claude Desktop 发左栏名，网关改写成右栏名转发。</p>
+      <div id="gw-routes-list"></div>
+      <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn btn-outline btn-sm" onclick="addGWRoute()">+ 添加映射</button>
+        <button class="btn btn-outline btn-sm" onclick="addGWRouteDefaults()">添加常用 Claude 模型</button>
+        <button class="btn btn-outline btn-sm" onclick="fillGWFromClaudeCode()">&#x1f4a1; 用 Claude Code 中转站填充</button>
+      </div>
+      <datalist id="gw-backend-datalist"></datalist>
+    </div>
+    <button class="btn btn-primary" onclick="saveGateway()">&#x1f4be; 保存网关配置</button>
+    <button class="btn btn-green" onclick="applyGatewayToClaudeDesktop()" style="margin-left:8px;">&#x26a1; 应用到 Claude Desktop</button>
+    <div id="gw-status" style="font-size:12px;color:var(--text2);margin-top:12px;"></div>
+  </div>
+</section>
+</main>
+
+<div class="toast-container" id="toasts"></div>
+
+<script>
+// ========== GLOBAL STATE ==========
+let currentState = {};
+let fetchedModels = [];
+
+// ========== UI HELPERS ==========
+function toast(msg, type) {
+  type = type || 'success';
+  const el = document.createElement('div');
+  el.className = 'toast ' + type;
+  el.textContent = msg;
+  document.getElementById('toasts').appendChild(el);
+  setTimeout(() => el.remove(), 3500);
+}
+function togglePwd(id, btn) {
+  const el = document.getElementById(id);
+  el.type = el.type === 'password' ? 'text' : 'password';
+  btn.textContent = el.type === 'password' ? '\u{1f441}' : '\u{1f512}';
+}
+function maskKey(k) {
+  if (!k) return '(未设置)';
+  if (k.length <= 12) return k.slice(0,4) + '***';
+  return k.slice(0,8) + '...' + k.slice(-4);
+}
+
+// Tab switching
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(x => x.classList.remove('active'));
+  const tab = document.querySelector('.tab[data-tab="' + name + '"]');
+  if (tab) tab.classList.add('active');
+  const panel = document.getElementById('panel-' + name);
+  if (panel) panel.classList.add('active');
+  if (name === 'codex-desktop') renderUpstreamTables();
+  if (name === 'models') renderMappingForms();
+  if (name === 'claude-desktop') renderCDModels();
+}
+
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => switchTab(t.dataset.tab));
+});
+
+// Fetch source toggle
+document.getElementById('fetch-source').addEventListener('change', function() {
+  document.getElementById('fetch-custom-fields').style.display = this.value === 'custom' ? 'block' : 'none';
+});
+
+// ========== API CALLS ==========
+async function api(path, method, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(path, opts);
+  return res.json();
+}
+
+async function loadState() {
+  try {
+    currentState = await api('/api/state', 'GET');
+    populateAllForms();
+    renderStatusGrid();
+    renderUpstreamTables();
+    renderMappingForms();
+    loadAppPaths();
+    proxyRefreshStatus();
+  } catch (e) {
+    toast('加载配置失败: ' + e.message, 'error');
+  }
+}
+
+// ========== POPULATE FORMS ==========
+function populateAllForms() {
+  const s = currentState;
+  const cc = s.claudeCode || {};
+  const cd = s.claudeDesktop || {};
+  const cx = s.codexCli || {};
+  const cxd = s.codexDesktop || {};
+
+  // Claude Code
+  setVal('cc-base-url', cc.baseUrl); setVal('cc-api-key', cc.authToken);
+  setVal('cc-opus-model', cc.opusModel); setVal('cc-sonnet-model', cc.sonnetModel);
+  setVal('cc-haiku-model', cc.haikuModel); setVal('cc-model', cc.model);
+  setVal('cc-reasoning-model', cc.reasoningModel); setVal('cc-subagent-model', cc.subagentModel);
+  setVal('cc-effort', cc.effortLevel || 'high');
+  setVal('cc-timeout', cc.apiTimeoutMs);
+  document.getElementById('cc-disable-nonessential').checked = cc.disableNonessential !== '0';
+  document.getElementById('cc-attribution-off').checked = cc.attributionHeader === '0';
+
+  // Claude Desktop
+  setVal('cd-base-url', cd.baseUrl); setVal('cd-api-key', cd.apiKey);
+  setVal('cd-auth-scheme', cd.authScheme); setVal('cd-provider', cd.provider);
+  setVal('cd-egress', cd.egressHosts);
+  renderCDModels(cd.models);
+
+  // Codex CLI
+  setVal('cx-base-url', cx.baseUrl); setVal('cx-api-key', cx.apiKey);
+  setVal('cx-model', cx.model); setVal('cx-model-provider', cx.modelProvider);
+  setVal('cx-provider-name', cx.providerName); setVal('cx-wire-api', cx.wireApi);
+  setVal('cx-reasoning', cx.reasoningEffort);
+  document.getElementById('cx-openai-auth').checked = cx.requiresOpenaiAuth !== false;
+
+  // Codex Desktop
+  setVal('cxd-injected-url', cxd.injectedBaseUrl); setVal('cxd-injected-key', cxd.injectedApiKey);
+
+  // Sync inputs
+  const syncUrl = cc.baseUrl || cd.baseUrl || cx.baseUrl || '';
+  const syncKey = cc.authToken || cd.apiKey || cx.apiKey || '';
+  setVal('sync-base-url', syncUrl); setVal('sync-api-key', syncKey);
+}
+
+function setVal(id, val) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (el.tagName === 'SELECT') el.value = val || el.options[0]?.value || '';
+  else if (el.type === 'checkbox') el.checked = !!val;
+  else el.value = val || '';
+}
+function getVal(id) { return document.getElementById(id)?.value || ''; }
+
+// ========== STATUS GRID ==========
+function renderStatusGrid() {
+  const s = currentState;
+  const items = [
+    { name: 'Claude Code CLI', url: s.claudeCode?.baseUrl, key: s.claudeCode?.authToken },
+    { name: 'Claude Desktop 3P', url: s.claudeDesktop?.baseUrl, key: s.claudeDesktop?.apiKey },
+    { name: 'Codex CLI', url: s.codexCli?.baseUrl, key: s.codexCli?.apiKey },
+    { name: 'Codex Desktop', url: s.codexDesktop?.injectedBaseUrl, key: s.codexDesktop?.injectedApiKey },
+  ];
+  const grid = document.getElementById('status-grid');
+  grid.innerHTML = items.map(i => {
+    const hasUrl = i.url && i.url.length > 0;
+    return `<div class="status-card">
+      <div class="name"><span class="status-dot ${hasUrl ? 'set' : 'unset'}"></span>${i.name}</div>
+      <div class="url">${i.url || '(未配置)'}</div>
+      <div class="key">${maskKey(i.key)}</div>
+    </div>`;
+  }).join('');
+}
+
+// ========== APP RESTART ==========
+async function restartApp(product) {
+  const el = document.getElementById('restart-status');
+  el.innerHTML = '<span class="loading"></span> 正在重启...';
+  try {
+    const res = await api('/api/restart/' + product, 'POST');
+    if (res.success) {
+      if (res.relaunched) {
+        toast(`${res.name || product} 已重启 (PID: ${res.pid})`);
+        el.innerHTML = `<span style="color:var(--green);">&#x2705; ${res.name} 已重启</span>`;
+      } else {
+        toast(res.warning || `${res.name} 已关闭，请手动重开`, 'error');
+        el.innerHTML = `<span style="color:var(--yellow);">&#x26a0; ${esc(res.warning || '已关闭，无法自动重启，请手动重开')}</span>`;
+      }
+    } else {
+      toast(res.error || '重启失败', 'error');
+      el.innerHTML = `<span style="color:var(--red);">&#x274c; 重启失败: ${res.error}</span>`;
+    }
+  } catch (e) {
+    toast('重启失败: ' + e.message, 'error');
+    el.innerHTML = `<span style="color:var(--red);">&#x274c; ${e.message}</span>`;
+  }
+  setTimeout(() => { el.innerHTML = ''; }, 6000);
+}
+
+// ========== APP PATHS CONFIG ==========
+async function loadAppPaths() {
+  try {
+    const apps = await api('/api/paths', 'GET');
+    for (const key of ['claude-desktop', 'codex-desktop', 'proxy']) {
+      const a = apps[key] || {};
+      const input = document.getElementById('path-' + key);
+      const status = document.getElementById('path-status-' + key);
+      if (input) input.value = a.customPath || a.exe || '';
+      if (status) {
+        if (a.exe) status.innerHTML = '<span style="color:var(--green);">&#x2705; 已检测</span>';
+        else status.innerHTML = '<span style="color:var(--red);">&#x274c; 未检测到，请手动填写</span>';
+      }
+    }
+  } catch (e) {}
+}
+
+async function saveAppPaths() {
+  const data = {
+    'claude-desktop': getVal('path-claude-desktop'),
+    'codex-desktop': getVal('path-codex-desktop'),
+    'proxy': getVal('path-proxy'),
+  };
+  try {
+    const res = await api('/api/paths', 'POST', data);
+    if (res.success) {
+      toast('应用路径已保存');
+      loadAppPaths();
+    } else {
+      toast(res.error || '保存失败', 'error');
+    }
+  } catch (e) {
+    toast('保存失败: ' + e.message, 'error');
+  }
+}
+
+// ========== AUTO-START ==========
+async function loadAutostart() {
+  try {
+    const res = await api('/api/autostart', 'GET');
+    const cb = document.getElementById('autostart-toggle');
+    const status = document.getElementById('autostart-status');
+    if (cb) cb.checked = !!res.enabled;
+    if (status) {
+      status.innerHTML = res.enabled
+        ? '<span style="color:var(--green);">&#x2705; 已启用</span> — 开机将静默启动 RelayManager（' + esc(res.vbsPath) + '）'
+        : '<span style="color:var(--text2);">&#x2610; 未启用</span>';
+    }
+  } catch (e) {}
+}
+
+async function toggleAutostart(enabled) {
+  try {
+    const res = await api('/api/autostart', 'POST', { enabled: !!enabled });
+    if (res.success) {
+      toast(enabled ? '已开启开机自启' : '已关闭开机自启');
+      loadAutostart();
+    } else {
+      toast(res.error || '设置失败', 'error');
+      loadAutostart();
+    }
+  } catch (e) {
+    toast('设置失败: ' + e.message, 'error');
+    loadAutostart();
+  }
+}
+
+// ========== FETCH MODELS ==========
+async function getFetchCredentials() {
+  const src = document.getElementById('fetch-source').value;
+  if (src === 'custom') {
+    return { baseUrl: getVal('fetch-base-url'), apiKey: getVal('fetch-api-key') };
+  }
+  const s = currentState;
+  switch (src) {
+    case 'claude-code': return { baseUrl: s.claudeCode?.baseUrl, apiKey: s.claudeCode?.authToken };
+    case 'claude-desktop': {
+      // Use Claude Desktop configLibrary's baseUrl/apiKey directly (the real relay).
+      // If it points to a local gateway (127.0.0.1, e.g. left by CC Switch) which can't
+      // list models, fall back to Claude Code's relay (a real upstream) as a convenience.
+      const cd = s.claudeDesktop || {};
+      const loopback = cd.baseUrl && /^(https?:\/\/)(127\.|localhost)/i.test(cd.baseUrl);
+      if (cd.baseUrl && cd.apiKey && !loopback) {
+        return { baseUrl: cd.baseUrl, apiKey: cd.apiKey, source: 'Claude Desktop 配置' };
+      }
+      const cc = s.claudeCode || {};
+      if (cc.baseUrl && cc.authToken) {
+        return { baseUrl: cc.baseUrl, apiKey: cc.authToken, source: loopback ? 'Claude Desktop 指向本地网关，改用 Claude Code 中转站' : '改用 Claude Code 中转站' };
+      }
+      return { baseUrl: '', apiKey: '', source: '未找到可用中转站。Claude Desktop 的 Base URL 指向本地网关且 Claude Code 也未配置中转站，请用「自定义」填写真实中转站地址' };
+    }
+    case 'codex-cli': return { baseUrl: s.codexCli?.baseUrl, apiKey: s.codexCli?.apiKey };
+    case 'codex-desktop': {
+      const active = (s.codexDesktop?.responsesUpstream || []).filter(e => e.status === 'active').sort((a,b) => (a.priority||99)-(b.priority||99));
+      return { baseUrl: active[0]?.baseUrl || '', apiKey: (active[0]?.apiKeys||[])[0] || '' };
+    }
+  }
+  return { baseUrl: '', apiKey: '' };
+}
+
+async function fetchModels() {
+  const creds = await getFetchCredentials();
+  if (!creds.baseUrl || !creds.apiKey) {
+    toast(creds.source || '无法获取 API 配置：所选产品的 Base URL 或 API Key 为空', 'error');
+    return;
+  }
+  const status = document.getElementById('fetch-status');
+  const sourceHint = creds.source ? '<span style="color:var(--text2);font-size:11px;">(' + esc(creds.source) + ')</span> ' : '';
+  status.innerHTML = sourceHint + '<span class="loading"></span> 获取中...';
+  try {
+    const params = new URLSearchParams({ baseUrl: creds.baseUrl, apiKey: creds.apiKey });
+    const res = await fetch('/api/models?' + params);
+    const data = await res.json();
+    fetchedModels = data.models || [];
+    renderModelList(data);
+    if (data.success) {
+      status.innerHTML = sourceHint + `<span style="color:var(--green);">&#x2705; 获取到 ${data.total} 个模型</span>`;
+    } else {
+      status.innerHTML = `<span style="color:var(--red);">&#x274c; ${data.error || '获取失败'}</span>`;
+    }
+  } catch (e) {
+    status.innerHTML = `<span style="color:var(--red);">&#x274c; ${e.message}</span>`;
+  }
+}
+
+function renderModelList(data) {
+  const container = document.getElementById('model-list');
+  // Populate datalist for Claude Desktop + gateway backend model autocomplete
+  const datalist = document.getElementById('cd-model-datalist');
+  const gwDatalist = document.getElementById('gw-backend-datalist');
+  if (data.models && data.models.length) {
+    const opts = data.models.map(m => `<option value="${esc(String(m.id))}">`).join('');
+    if (datalist) datalist.innerHTML = opts;
+    if (gwDatalist) gwDatalist.innerHTML = opts;
+  }
+  if (!data.models || data.models.length === 0) {
+    container.innerHTML = '<p style="color:var(--text2);font-size:12px;">' + (data.error || '未获取到模型列表') + '</p>';
+    return;
+  }
+  container.innerHTML = '<h3>可用模型 (' + data.models.length + ')</h3>' +
+    data.models.map((m, i) => `<div class="model-item">
+      <span class="model-id">${esc(String(m.id))}</span>
+      <span class="model-owner">${esc(String(m.owned_by||''))}</span>
+      <button class="copy-btn" onclick="copyToClipboard('${esc(String(m.id))}')" title="复制模型 ID">&#x1f4cb;</button>
+    </div>`).join('');
+}
+
+function copyToClipboard(text) {
+  navigator.clipboard.writeText(text).then(() => toast('已复制: ' + text)).catch(() => toast('复制失败', 'error'));
+}
+
+// ========== CLAUDE DESKTOP MODEL LIST EDITOR ==========
+let cdModels = []; // array of {name}
+
+function parseCDModels(modelsStr) {
+  try {
+    const arr = JSON.parse(modelsStr || '[]');
+    if (Array.isArray(arr)) return arr.map(m => ({ name: m.name || (typeof m === 'string' ? m : '') }));
+  } catch (e) {}
+  return [];
+}
+
+function renderCDModels(modelsStr) {
+  if (modelsStr !== undefined) cdModels = parseCDModels(modelsStr);
+  const container = document.getElementById('cd-models-list');
+  if (!container) return;
+  if (cdModels.length === 0) {
+    container.innerHTML = '<p style="color:var(--text2);font-size:12px;">暂无模型，点击下方添加</p>';
+    return;
+  }
+  container.innerHTML = cdModels.map((m, i) => `<div class="mapping-row" style="margin-bottom:6px;">
+    <span style="color:var(--text2);font-size:12px;min-width:24px;">${i+1}.</span>
+    <input list="cd-model-datalist" value="${esc(m.name||'')}" data-idx="${i}" placeholder="模型 ID，如 claude-sonnet-4-5">
+    <button class="btn btn-red btn-sm" onclick="removeCDModel(${i})">&#x2715;</button>
+  </div>`).join('');
+}
+
+function addCDModel(name) {
+  cdModels.push({ name: name || '' });
+  renderCDModels();
+}
+
+function removeCDModel(idx) {
+  cdModels.splice(idx, 1);
+  renderCDModels();
+}
+
+function collectCDModels() {
+  const inputs = document.querySelectorAll('#cd-models-list input[data-idx]');
+  const map = {};
+  inputs.forEach(inp => { map[inp.dataset.idx] = inp.value; });
+  // Preserve order: read current cdModels, update names from inputs
+  const result = cdModels.map((m, i) => ({ name: (map[i] !== undefined ? map[i] : m.name) || '' })).filter(m => m.name);
+  return JSON.stringify(result);
+}
+
+function fillCDModelsFromFetched() {
+  if (!fetchedModels || fetchedModels.length === 0) {
+    toast('请先在上方「获取可用模型列表」获取模型', 'error');
+    return;
+  }
+  cdModels = fetchedModels.map(m => ({ name: String(m.id) }));
+  renderCDModels();
+  toast('已填充 ' + fetchedModels.length + ' 个模型，点击保存生效');
+}
+
+// ========== MODEL MAPPING FORMS ==========
+function renderMappingForms() {
+  const s = currentState;
+  const cc = s.claudeCode || {};
+  const cd = s.claudeDesktop || {};
+  const cx = s.codexCli || {};
+  const cxd = s.codexDesktop || {};
+
+  // Claude Code mapping
+  document.getElementById('mapping-cc').innerHTML = `
+    <div class="mapping-row"><span>Opus:</span><input id="map-cc-opus" value="${esc(cc.opusModel||'')}" placeholder="deepseek-v4-pro"></div>
+    <div class="mapping-row"><span>Sonnet:</span><input id="map-cc-sonnet" value="${esc(cc.sonnetModel||'')}" placeholder="deepseek-v4-flash"></div>
+    <div class="mapping-row"><span>Haiku:</span><input id="map-cc-haiku" value="${esc(cc.haikuModel||'')}" placeholder="deepseek-v4-flash"></div>
+    <div class="mapping-row"><span>Default:</span><input id="map-cc-default" value="${esc(cc.model||'')}" placeholder="deepseek-v4-pro"></div>
+    <div class="mapping-row"><span>Reasoning:</span><input id="map-cc-reasoning" value="${esc(cc.reasoningModel||'')}" placeholder="deepseek-v4-flash"></div>`;
+
+  // Claude Desktop mapping — edited on the Claude Desktop tab (renderCDModels)
+  // (no fields on this tab)
+
+  // Codex CLI mapping
+  setVal('mapping-cx-model', cx.model || 'gpt-5.5');
+  setVal('mapping-cx-effort', cx.reasoningEffort || 'high');
+
+  // Codex Desktop mapping
+  const respUp = cxd.responsesUpstream || [];
+  const chatUp = cxd.chatUpstream || [];
+  document.getElementById('mapping-cxd-container').innerHTML =
+    '<h3>responsesUpstream</h3>' +
+    respUp.map((u, i) => `<div class="mapping-row" style="margin-bottom:4px;">
+      <span style="font-size:11px;color:var(--text2);min-width:80px;">${esc(u.name||'entry'+i)}</span>
+      <span style="font-size:11px;color:var(--text2);min-width:20px;">→</span>
+      <input id="map-cxd-${i}" value="${esc(JSON.stringify(u.modelMapping||{}))}" style="flex:1;font-size:11px;" placeholder='{"gpt-5.5":"gpt-5.5"}'>
+    </div>`).join('') +
+    '<h3 style="margin-top:12px;">chatUpstream</h3>' +
+    chatUp.map((u, i) => `<div class="mapping-row" style="margin-bottom:4px;">
+      <span style="font-size:11px;color:var(--text2);min-width:80px;">${esc(u.name||'chat'+i)}</span>
+      <span style="font-size:11px;color:var(--text2);min-width:20px;">→</span>
+      <input id="map-cxd-chat-${i}" value="${esc(JSON.stringify(u.modelMapping||{}))}" style="flex:1;font-size:11px;" placeholder='{"gpt-5.5":"deepseek-v4-pro"}'>
+    </div>`).join('');
+}
+
+async function saveMappingCC() {
+  const data = {
+    claudeCode: {
+      opusModel: getVal('map-cc-opus'), sonnetModel: getVal('map-cc-sonnet'),
+      haikuModel: getVal('map-cc-haiku'), model: getVal('map-cc-default'),
+      reasoningModel: getVal('map-cc-reasoning'),
+    }
+  };
+  await api('/api/save', 'POST', data);
+  toast('Claude Code 模型映射已保存');
+  loadState();
+}
+
+// saveMappingCD removed — Claude Desktop models now edited on the Claude Desktop tab via renderCDModels/collectCDModels
+
+async function saveMappingCX() {
+  const data = {
+    codexCli: {
+      model: getVal('mapping-cx-model'),
+      reasoningEffort: getVal('mapping-cx-effort'),
+    }
+  };
+  await api('/api/save', 'POST', data);
+  toast('Codex CLI 模型映射已保存');
+  loadState();
+}
+
+async function saveMappingCXD() {
+  const s = currentState;
+  const respUp = s.codexDesktop?.responsesUpstream || [];
+  const chatUp = s.codexDesktop?.chatUpstream || [];
+  const newResp = respUp.map((u, i) => {
+    const val = getVal('map-cxd-' + i);
+    try { u.modelMapping = JSON.parse(val); } catch(e) { toast('JSON 格式错误: ' + u.name, 'error'); }
+    return u;
+  });
+  const newChat = chatUp.map((u, i) => {
+    const val = getVal('map-cxd-chat-' + i);
+    try { u.modelMapping = JSON.parse(val); } catch(e) { toast('JSON 格式错误: ' + u.name, 'error'); }
+    return u;
+  });
+  const data = { codexDesktop: { responsesUpstream: newResp, chatUpstream: newChat } };
+  await api('/api/save', 'POST', data);
+  toast('Codex Desktop 模型映射已保存');
+  loadState();
+}
+
+// ========== UPSTREAM TABLE ==========
+function renderUpstreamTables() {
+  const s = currentState;
+  const upstreams = (s.codexDesktop && s.codexDesktop.responsesUpstream) || [];
+  const table = document.getElementById('responses-upstream-table');
+  if (upstreams.length === 0) {
+    table.innerHTML = '<p style="color:var(--text2);font-size:12px;">暂无上游配置</p>';
+    return;
+  }
+  table.innerHTML = `<table class="upstream-table">
+    <thead><tr><th>名称</th><th>Base URL</th><th>API Key</th><th>模型映射</th><th>优先级</th><th>状态</th><th></th></tr></thead>
+    <tbody>${upstreams.map((u, i) => `
+      <tr>
+        <td><input value="${esc(u.name||'')}" data-idx="${i}" data-field="name" style="width:100px;"></td>
+        <td><input value="${esc(u.baseUrl||'')}" data-idx="${i}" data-field="baseUrl" style="width:200px;"></td>
+        <td><input type="password" value="${esc((u.apiKeys||[])[0]||'')}" data-idx="${i}" data-field="apiKey0" style="width:180px;"></td>
+        <td><span class="mono">${esc(JSON.stringify(u.modelMapping||{}))}</span></td>
+        <td><input type="number" value="${u.priority||1}" data-idx="${i}" data-field="priority" style="width:60px;"></td>
+        <td><select data-idx="${i}" data-field="status"><option value="active" ${u.status==='active'?'selected':''}>active</option><option value="suspended" ${u.status==='suspended'?'selected':''}>suspended</option></select></td>
+        <td><button class="btn btn-red btn-sm" onclick="deleteUpstream(${i})">&#x2715;</button></td>
+      </tr>`).join('')}
+    </tbody></table>`;
+}
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function collectUpstreamTable() {
+  const inputs = document.querySelectorAll('#responses-upstream-table input, #responses-upstream-table select');
+  const map = {};
+  inputs.forEach(inp => {
+    const idx = parseInt(inp.dataset.idx);
+    if (!map[idx]) map[idx] = {};
+    map[idx][inp.dataset.field] = inp.value;
+  });
+  const keys = Object.keys(map).sort((a,b) => parseInt(a) - parseInt(b));
+  return keys.map((k, i) => {
+    const orig = (currentState.codexDesktop?.responsesUpstream || [])[parseInt(k)] || {};
+    return {
+      ...orig,
+      name: map[k].name || orig.name || '',
+      baseUrl: map[k].baseUrl || orig.baseUrl || '',
+      apiKeys: [map[k].apiKey0 || (orig.apiKeys||[])[0] || ''],
+      priority: parseInt(map[k].priority) || orig.priority || 1,
+      status: map[k].status || orig.status || 'active',
+      modelMapping: orig.modelMapping || {},
+      reasoningMapping: orig.reasoningMapping || {},
+      serviceType: orig.serviceType || 'responses',
+      reasoningParamStyle: orig.reasoningParamStyle || 'reasoning',
+      codexToolCompat: orig.codexToolCompat !== undefined ? orig.codexToolCompat : false,
+      autoBlacklistBalance: orig.autoBlacklistBalance !== undefined ? orig.autoBlacklistBalance : true,
+      normalizeMetadataUserId: orig.normalizeMetadataUserId !== undefined ? orig.normalizeMetadataUserId : true,
+      stripBillingHeader: orig.stripBillingHeader || false,
+      rateLimitAutoFromHeaders: orig.rateLimitAutoFromHeaders || false,
+    };
+  });
+}
+function addUpstream() {
+  const s = currentState;
+  const upstreams = s.codexDesktop?.responsesUpstream || [];
+  upstreams.push({ name:'new-upstream', baseUrl:'', apiKeys:[''], modelMapping:{'gpt-5.5':'gpt-5.5'}, reasoningMapping:{'gpt-5.5':'xhigh'}, reasoningParamStyle:'reasoning', serviceType:'responses', codexToolCompat:false, priority:(upstreams.length+1), status:'active', autoBlacklistBalance:true, normalizeMetadataUserId:true, stripBillingHeader:false, rateLimitAutoFromHeaders:false });
+  if (!s.codexDesktop) s.codexDesktop = {};
+  s.codexDesktop.responsesUpstream = upstreams;
+  renderUpstreamTables();
+}
+function deleteUpstream(idx) {
+  const s = currentState;
+  if (!s.codexDesktop || !s.codexDesktop.responsesUpstream) return;
+  s.codexDesktop.responsesUpstream.splice(idx, 1);
+  renderUpstreamTables();
+}
+
+// ========== SAVE FUNCTIONS ==========
+async function doSyncAll() {
+  const baseUrl = getVal('sync-base-url');
+  const apiKey = getVal('sync-api-key');
+  if (!baseUrl) { toast('请输入 Base URL', 'error'); return; }
+  const data = { syncAll: {
+    baseUrl, apiKey,
+    claudeCode: document.getElementById('sync-cc').checked,
+    claudeDesktop: document.getElementById('sync-cd').checked,
+    codexCli: document.getElementById('sync-cx').checked,
+    codexDesktop: document.getElementById('sync-cxd').checked,
+  }};
+  try {
+    showLoading('sync');
+    const res = await api('/api/save', 'POST', data);
+    hideLoading('sync');
+    if (res.success) { toast('已同步 ' + res.backups.length + ' 个配置文件'); loadState(); }
+    else { toast(res.error || '保存失败', 'error'); }
+  } catch (e) { toast('保存失败: ' + e.message, 'error'); }
+}
+async function saveClaudeCode() {
+  // Optionally append [1m] to all model fields
+  const add1m = document.getElementById('cc-1m').checked;
+  const mk = (v) => { if (!v) return v; if (add1m && !/\[1m\]/.test(v)) return v + '[1m]'; return v; };
+  const data = {
+    claudeCode: {
+      baseUrl: getVal('cc-base-url'), authToken: getVal('cc-api-key'),
+      opusModel: mk(getVal('cc-opus-model')), sonnetModel: mk(getVal('cc-sonnet-model')),
+      haikuModel: mk(getVal('cc-haiku-model')), model: mk(getVal('cc-model')),
+      reasoningModel: mk(getVal('cc-reasoning-model')), subagentModel: mk(getVal('cc-subagent-model')),
+      effortLevel: getVal('cc-effort'),
+      apiTimeoutMs: getVal('cc-timeout'),
+      disableNonessential: document.getElementById('cc-disable-nonessential').checked,
+      attributionHeader: document.getElementById('cc-attribution-off').checked ? '0' : '1',
+    }
+  };
+  await api('/api/save', 'POST', data);
+  toast('Claude Code 配置已保存' + (add1m ? '（已追加 [1m]）' : '')); loadState();
+}
+
+function unifyCCModels() {
+  const def = getVal('cc-model');
+  if (!def) { toast('请先填写 Default Model', 'error'); return; }
+  setVal('cc-opus-model', def);
+  setVal('cc-sonnet-model', def);
+  setVal('cc-haiku-model', def);
+  setVal('cc-reasoning-model', def);
+  setVal('cc-subagent-model', def);
+  toast('已将 Opus/Sonnet/Haiku/Reasoning/Subagent 统一为 ' + def + '，记得保存');
+}
+async function saveClaudeDesktop() {
+  const data = { claudeDesktop: {
+    baseUrl: getVal('cd-base-url'), apiKey: getVal('cd-api-key'),
+    authScheme: getVal('cd-auth-scheme'), provider: getVal('cd-provider'),
+    egressHosts: getVal('cd-egress'), models: collectCDModels(),
+    disableDeploymentChooser: true,
+  }};
+  await api('/api/save', 'POST', data);
+  toast('Claude Desktop 配置已保存，记得重启 Claude Desktop 生效'); loadState();
+}
+
+// Fill Claude Desktop Base URL + API Key from Claude Code's config (a known-working relay)
+function fillCDFromClaudeCode() {
+  const cc = currentState.claudeCode || {};
+  if (!cc.baseUrl) { toast('Claude Code 未配置中转站 Base URL', 'error'); return; }
+  setVal('cd-base-url', cc.baseUrl);
+  setVal('cd-api-key', cc.authToken || '');
+  toast('已填入 Claude Code 的中转站：' + cc.baseUrl + '，点击保存生效');
+}
+
+// Test whether the current Claude Desktop Base URL + API Key can reach the relay
+async function testCDConnection() {
+  const baseUrl = getVal('cd-base-url');
+  const apiKey = getVal('cd-api-key');
+  const status = document.getElementById('cd-conn-status');
+  if (!baseUrl || !apiKey) {
+    status.innerHTML = '<span style="color:var(--red);">&#x274c; 请先填写 Base URL 和 API Key</span>';
+    return;
+  }
+  status.innerHTML = '<span class="loading"></span> 测试中...';
+  try {
+    const params = new URLSearchParams({ baseUrl, apiKey });
+    const res = await fetch('/api/models?' + params);
+    const data = await res.json();
+    if (data.success && data.total > 0) {
+      status.innerHTML = '<span style="color:var(--green);">&#x2705; 连接成功，可用模型 ' + data.total + ' 个</span>';
+    } else if (data.error && /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|fetch failed/i.test(data.error)) {
+      status.innerHTML = '<span style="color:var(--red);">&#x274c; 无法连接：' + esc(data.error) + '（检查地址是否正确、是否需要代理）</span>';
+    } else if (data.error && /401|Invalid token|未授权|unauthorized/i.test(data.error)) {
+      status.innerHTML = '<span style="color:var(--yellow);">&#x26a0; 地址可达但 API Key 无效：' + esc(data.error) + '</span>';
+    } else {
+      status.innerHTML = '<span style="color:var(--yellow);">&#x26a0; ' + esc(data.error || '未知响应') + '（地址可达，可能该端点不支持列模型，但不影响实际对话）</span>';
+    }
+  } catch (e) {
+    status.innerHTML = '<span style="color:var(--red);">&#x274c; 测试失败：' + esc(e.message) + '</span>';
+  }
+}
+
+async function saveCodexCli() {
+  const data = { codexCli: {
+    baseUrl: getVal('cx-base-url'), apiKey: getVal('cx-api-key'),
+    model: getVal('cx-model'), modelProvider: getVal('cx-model-provider'),
+    providerName: getVal('cx-provider-name'), wireApi: getVal('cx-wire-api'),
+    reasoningEffort: getVal('cx-reasoning'),
+    requiresOpenaiAuth: document.getElementById('cx-openai-auth').checked,
+  }};
+  await api('/api/save', 'POST', data);
+  toast('Codex CLI 配置已保存'); loadState();
+}
+async function saveCodexDesktopInjection() {
+  const data = { codexDesktop: { injectedBaseUrl: getVal('cxd-injected-url'), injectedApiKey: getVal('cxd-injected-key') } };
+  await api('/api/save', 'POST', data);
+  toast('Codex Desktop 注入配置已保存'); loadState();
+}
+async function saveCodexDesktopUpstream() {
+  const upstreams = collectUpstreamTable();
+  const data = { codexDesktop: { responsesUpstream: upstreams, chatUpstream: currentState.codexDesktop?.chatUpstream || [] } };
+  await api('/api/save', 'POST', data);
+  toast('Codex Desktop 上游配置已保存'); loadState();
+}
+
+// ========== PROXY ==========
+async function proxyRefreshStatus() {
+  try {
+    const res = await api('/api/proxy/status', 'GET');
+    updateProxyUI(res);
+  } catch (e) {}
+}
+function updateProxyUI(status) {
+  const on = status.processRunning || status.portListening;
+  const dot = on ? '<span class="indicator on"></span>' : '<span class="indicator off"></span>';
+  const text = on
+    ? `<span style="color:var(--green);">代理运行中</span> — 端口 ${status.port} ${status.portListening ? '&#x2705; 监听中' : '&#x26a0; 未监听'}`
+    : '<span style="color:var(--red);">代理未运行</span>';
+  const html = dot + '<div class="info">' + text + '</div>';
+  const el1 = document.getElementById('proxy-status-overview');
+  const el2 = document.getElementById('proxy-status-detail');
+  if (el1) el1.innerHTML = html;
+  if (el2) el2.innerHTML = html;
+}
+async function proxyStart() {
+  try {
+    const res = await api('/api/proxy/start', 'POST');
+    if (res.success) { toast('Clash Verge 已启动 (PID: ' + res.pid + ')'); }
+    else { toast(res.error || '启动失败', 'error'); }
+    setTimeout(proxyRefreshStatus, 3000);
+  } catch (e) { toast('启动失败: ' + e.message, 'error'); }
+}
+async function proxyStop() {
+  try {
+    const res = await api('/api/proxy/stop', 'POST');
+    if (res.success) { toast('Clash Verge 已停止'); }
+    else { toast(res.error || '停止失败', 'error'); }
+    setTimeout(proxyRefreshStatus, 1000);
+  } catch (e) { toast('停止失败: ' + e.message, 'error'); }
+}
+async function saveProxy() {
+  const data = { proxy: {
+    proxyHost: getVal('px-host'), proxyPort: getVal('px-port'),
+    noProxy: getVal('px-no-proxy'),
+    wsProxy: document.getElementById('px-ws').checked,
+    wssProxy: document.getElementById('px-wss').checked,
+  }};
+  await api('/api/save', 'POST', data);
+  toast('代理配置已保存'); loadState();
+}
+function showLoading() {
+  const btn = document.querySelector('.btn-lg');
+  if (btn) { btn.dataset.origText = btn.innerHTML; btn.innerHTML = '<span class="loading"></span> 保存中...'; btn.disabled = true; }
+}
+function hideLoading() {
+  const btn = document.querySelector('.btn-lg');
+  if (btn && btn.dataset.origText) { btn.innerHTML = btn.dataset.origText; delete btn.dataset.origText; btn.disabled = false; }
+}
+
+// ========== INIT ==========
+loadState();
+loadGateway();
+loadAutostart();
+
+// ========== RELAY GATEWAY ==========
+let gwRoutes = []; // array of {anthropic, backend}
+const GW_DEFAULT_CLAUDE_MODELS = ['claude-sonnet-4-5', 'claude-opus-4-8', 'claude-haiku-4-5', 'claude-sonnet-4-6'];
+
+async function loadGateway() {
+  try {
+    const cfg = await api('/api/gateway', 'GET');
+    setVal('gw-upstream-url', cfg.upstreamBaseUrl || '');
+    setVal('gw-upstream-key', cfg.upstreamApiKey || '');
+    setVal('gw-port', cfg.port || 9877);
+    gwRoutes = Object.entries(cfg.routes || {}).map(([k, v]) => ({ anthropic: k, backend: v }));
+    renderGWRoutes();
+    const status = document.getElementById('gw-status');
+    if (status) {
+      const port = cfg.port || 9877;
+      status.innerHTML = '网关地址: <span style="color:var(--accent);">http://127.0.0.1:' + port + '</span>（Claude Desktop 的 Base URL 应指向此地址，勿加 /v1，Claude Desktop 会自动拼 /v1/messages）';
+    }
+  } catch (e) {}
+}
+
+function renderGWRoutes() {
+  const container = document.getElementById('gw-routes-list');
+  if (!container) return;
+  if (gwRoutes.length === 0) {
+    container.innerHTML = '<p style="color:var(--text2);font-size:12px;">暂无映射，点击下方添加</p>';
+    return;
+  }
+  container.innerHTML = gwRoutes.map((r, i) => `<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap;">
+    <input value="${esc(r.anthropic||'')}" data-idx="${i}" data-field="anthropic" placeholder="claude-sonnet-4-5" style="flex:1;min-width:160px;">
+    <span style="color:var(--text2);font-size:12px;">→</span>
+    <input list="gw-backend-datalist" value="${esc(r.backend||'')}" data-idx="${i}" data-field="backend" placeholder="glm-5.2" style="flex:1;min-width:160px;">
+    <button class="btn btn-red btn-sm" onclick="removeGWRoute(${i})">&#x2715;</button>
+  </div>`).join('');
+}
+
+function addGWRoute(anthropic, backend) {
+  gwRoutes.push({ anthropic: anthropic || '', backend: backend || '' });
+  renderGWRoutes();
+}
+
+function addGWRouteDefaults() {
+  const existing = new Set(gwRoutes.map(r => r.anthropic));
+  let added = 0;
+  for (const m of GW_DEFAULT_CLAUDE_MODELS) {
+    if (!existing.has(m)) { gwRoutes.push({ anthropic: m, backend: '' }); added++; }
+  }
+  renderGWRoutes();
+  toast(added > 0 ? '已添加 ' + added + ' 个常用 Claude 模型' : '常用模型已全部存在');
+}
+
+function removeGWRoute(idx) { gwRoutes.splice(idx, 1); renderGWRoutes(); }
+
+function collectGWRoutes() {
+  const inputs = document.querySelectorAll('#gw-routes-list input[data-idx]');
+  const map = {};
+  inputs.forEach(inp => {
+    const idx = inp.dataset.idx;
+    if (!map[idx]) map[idx] = {};
+    map[idx][inp.dataset.field] = inp.value;
+  });
+  return gwRoutes.map((r, i) => ({
+    anthropic: (map[i] && map[i].anthropic !== undefined) ? map[i].anthropic : r.anthropic,
+    backend: (map[i] && map[i].backend !== undefined) ? map[i].backend : r.backend,
+  })).filter(r => r.anthropic);
+}
+
+function fillGWFromClaudeCode() {
+  const cc = currentState.claudeCode || {};
+  if (!cc.baseUrl) { toast('Claude Code 未配置中转站', 'error'); return; }
+  setVal('gw-upstream-url', cc.baseUrl);
+  setVal('gw-upstream-key', cc.authToken || '');
+  // Pre-fill backend with Claude Code's main model
+  if (gwRoutes.length === 0) addGWRoute('claude-sonnet-4-5', cc.model || 'glm-5.2');
+  else if (!gwRoutes[0].backend) gwRoutes[0].backend = cc.model || 'glm-5.2';
+  renderGWRoutes();
+  toast('已用 Claude Code 中转站填充上游，模型名可按需调整');
+}
+
+async function saveGateway() {
+  const data = {
+    upstreamBaseUrl: getVal('gw-upstream-url'),
+    upstreamApiKey: getVal('gw-upstream-key'),
+    port: getVal('gw-port'),
+    routes: collectGWRoutes(),
+  };
+  try {
+    const res = await api('/api/gateway', 'POST', data);
+    if (res.success) {
+      toast('网关配置已保存（路由即时生效，改端口需重启服务）');
+      loadGateway();
+    } else { toast(res.error || '保存失败', 'error'); }
+  } catch (e) { toast('保存失败: ' + e.message, 'error'); }
+}
+
+async function applyGatewayToClaudeDesktop() {
+  try {
+    const res = await api('/api/gateway/apply-claude-desktop', 'POST');
+    if (res.success) {
+      toast('已把 Claude Desktop 指向本地网关，请重启 Claude Desktop');
+      const status = document.getElementById('gw-status');
+      if (status) status.innerHTML += '<br><span style="color:var(--green);">&#x2705; Claude Desktop Base URL 已设为 ' + esc(res.gatewayUrl) + '，inferenceModels=' + esc(JSON.stringify(res.inferenceModels.map(m=>m.name))) + '</span>';
+      loadState();
+    } else { toast(res.error || '应用失败', 'error'); }
+  } catch (e) { toast('应用失败: ' + e.message, 'error'); }
+}
+
+</script>
+</body>
+</html>
