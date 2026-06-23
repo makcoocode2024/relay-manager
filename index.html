@@ -364,7 +364,21 @@ main { max-width:960px; margin:0 auto; padding:24px 16px; }
 <section class="tab-panel" id="panel-claude-desktop">
   <div class="card">
     <h2>Claude Desktop (3P) 配置</h2>
-    <p style="font-size:12px;color:var(--text2);margin-bottom:16px;">修改 <code style="background:var(--bg3);padding:1px 4px;border-radius:3px;">AppData\Local\Claude-3p\configLibrary\&lt;id&gt;.json</code></p>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:12px;">修改 <code style="background:var(--bg3);padding:1px 4px;border-radius:3px;">AppData\Local\Claude-3p\configLibrary\&lt;id&gt;.json</code></p>
+    <!-- 多套配置管理 -->
+    <div style="background:var(--bg3);border-radius:8px;padding:10px 12px;margin-bottom:16px;">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <label style="font-size:12px;color:var(--text2);white-space:nowrap;">当前配置</label>
+        <select id="cd-config-select" onchange="switchCDConfig()" style="flex:1;min-width:160px;"></select>
+        <button class="btn btn-outline btn-sm" onclick="newCDConfig()">+ 新建</button>
+        <button class="btn btn-outline btn-sm" onclick="renameCDConfigUI()">&#x270e; 重命名</button>
+        <button class="btn btn-red btn-sm" onclick="deleteCDConfigUI()">&#x2715; 删除</button>
+        <button class="btn btn-outline btn-sm" onclick="exportCDConfigUI()">&#x2b07; 导出</button>
+        <button class="btn btn-outline btn-sm" onclick="document.getElementById('cd-import-file').click()">&#x2b06; 导入</button>
+        <input type="file" id="cd-import-file" accept="application/json,.json" style="display:none" onchange="importCDConfigUI(event)">
+      </div>
+      <p style="font-size:11px;color:var(--text2);margin:6px 0 0;">切换=改变 Claude Desktop 实际生效的配置；下方表单编辑的始终是「当前配置」。改完记得重启 Claude Desktop。</p>
+    </div>
     <div class="form-row">
       <div class="form-group">
         <label>Base URL</label>
@@ -385,12 +399,16 @@ main { max-width:960px; margin:0 auto; padding:24px 16px; }
     </div>
     <div class="form-row">
       <div class="form-group">
-        <label>Auth Scheme</label>
-        <input type="text" id="cd-auth-scheme" placeholder="bearer">
+        <label>Auth Scheme（认证方式）</label>
+        <select id="cd-auth-scheme">
+          <option value="bearer">bearer（Authorization: Bearer）</option>
+          <option value="x-api-key">x-api-key</option>
+          <option value="none">none（不发认证头）</option>
+        </select>
       </div>
       <div class="form-group">
-        <label>Inference Provider</label>
-        <input type="text" id="cd-provider" placeholder="gateway">
+        <label>Inference Provider（固定 gateway）</label>
+        <input type="text" id="cd-provider" placeholder="gateway" value="gateway">
       </div>
     </div>
     <div class="form-group">
@@ -599,6 +617,23 @@ main { max-width:960px; margin:0 auto; padding:24px 16px; }
       </div>
     </div>
     <div class="form-group">
+      <label>思考字段兜底（thinking compatibility）</label>
+      <p style="font-size:11px;color:var(--text2);margin-bottom:8px;">解决第三方网关「thinking 字段缺失/不兼容」报错。透传=不改；补全=请求缺 thinking 时自动注入（并提高 max_tokens、去掉 temperature）；剥离=移除 thinking 字段。</p>
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+        <div class="form-group" style="margin-bottom:0;">
+          <select id="gw-thinking-mode" onchange="onGWThinkingChange()">
+            <option value="passthrough">透传（默认，不改 thinking）</option>
+            <option value="inject">补全（缺失时自动注入 thinking）</option>
+            <option value="strip">剥离（移除 thinking 字段）</option>
+          </select>
+        </div>
+        <div class="form-group" id="gw-thinking-budget-wrap" style="margin-bottom:0;display:none;">
+          <label style="font-size:11px;">思考预算 budget_tokens</label>
+          <input type="text" id="gw-thinking-budget" placeholder="10000" style="width:120px;">
+        </div>
+      </div>
+    </div>
+    <div class="form-group">
       <label>模型映射表 — Anthropic 模型名 → 后端模型</label>
       <p style="font-size:11px;color:var(--text2);margin-bottom:8px;">左栏填 Claude Desktop 要求的 Anthropic 模型名（如 claude-sonnet-4-5），右栏填中转站实际支持的后端模型（如 glm-5.2，可从「模型映射」标签页获取后选）。Claude Desktop 发左栏名，网关改写成右栏名转发。</p>
       <div id="gw-routes-list"></div>
@@ -608,6 +643,10 @@ main { max-width:960px; margin:0 auto; padding:24px 16px; }
         <button class="btn btn-outline btn-sm" onclick="fillGWFromClaudeCode()">&#x1f4a1; 用 Claude Code 中转站填充</button>
       </div>
       <datalist id="gw-backend-datalist"></datalist>
+    </div>
+    <div class="check-row" style="margin-bottom:12px;">
+      <input type="checkbox" id="gw-logging">
+      <label for="gw-logging">开启脱敏请求日志（仅记录模型名改写 + 路径 + 时间，<b>绝不记录消息内容或密钥</b>，便于排查兼容问题）</label>
     </div>
     <button class="btn btn-primary" onclick="saveGateway()">&#x1f4be; 保存网关配置</button>
     <button class="btn btn-green" onclick="applyGatewayToClaudeDesktop()" style="margin-left:8px;">&#x26a1; 应用到 Claude Desktop</button>
@@ -710,9 +749,10 @@ function populateAllForms() {
 
   // Claude Desktop
   setVal('cd-base-url', cd.baseUrl); setVal('cd-api-key', cd.apiKey);
-  setVal('cd-auth-scheme', cd.authScheme); setVal('cd-provider', cd.provider);
+  setVal('cd-auth-scheme', cd.authScheme || 'bearer'); setVal('cd-provider', cd.provider || 'gateway');
   setVal('cd-egress', cd.egressHosts);
   renderCDModels(cd.models);
+  loadCDConfigs();
 
   // Codex CLI
   setVal('cx-base-url', cx.baseUrl); setVal('cx-api-key', cx.apiKey);
@@ -976,7 +1016,9 @@ function collectCDModels() {
   const map = {};
   inputs.forEach(inp => { map[inp.dataset.idx] = inp.value; });
   // Preserve order: read current cdModels, update names from inputs
-  const result = cdModels.map((m, i) => ({ name: (map[i] !== undefined ? map[i] : m.name) || '' })).filter(m => m.name);
+  const result = cdModels
+    .map((m, i) => ({ name: String((map[i] !== undefined ? map[i] : m.name) || '').trim() }))
+    .filter(m => m.name);
   return JSON.stringify(result);
 }
 
@@ -1062,17 +1104,49 @@ async function saveMappingCXD() {
   const s = currentState;
   const respUp = s.codexDesktop?.responsesUpstream || [];
   const chatUp = s.codexDesktop?.chatUpstream || [];
+  const errors = [];
+
+  // Validate every modelMapping field BEFORE writing anything, so one bad entry
+  // can't half-save. Each must parse to a plain JSON object of string->string.
+  function parseMapping(val, label) {
+    let parsed;
+    try { parsed = JSON.parse(val); }
+    catch (e) { errors.push(label + '：JSON 语法错误（' + e.message + '）'); return null; }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      errors.push(label + '：必须是 JSON 对象，如 {"gpt-5.5":"deepseek-v4"}');
+      return null;
+    }
+    for (const k of Object.keys(parsed)) {
+      if (typeof parsed[k] !== 'string') {
+        errors.push(label + '：键 "' + k + '" 的值必须是字符串');
+        return null;
+      }
+    }
+    return parsed;
+  }
+
   const newResp = respUp.map((u, i) => {
-    const val = getVal('map-cxd-' + i);
-    try { u.modelMapping = JSON.parse(val); } catch(e) { toast('JSON 格式错误: ' + u.name, 'error'); }
-    return u;
+    const parsed = parseMapping(getVal('map-cxd-' + i), 'responsesUpstream「' + (u.name || ('entry' + i)) + '」');
+    return { u, parsed };
   });
   const newChat = chatUp.map((u, i) => {
-    const val = getVal('map-cxd-chat-' + i);
-    try { u.modelMapping = JSON.parse(val); } catch(e) { toast('JSON 格式错误: ' + u.name, 'error'); }
-    return u;
+    const parsed = parseMapping(getVal('map-cxd-chat-' + i), 'chatUpstream「' + (u.name || ('chat' + i)) + '」');
+    return { u, parsed };
   });
-  const data = { codexDesktop: { responsesUpstream: newResp, chatUpstream: newChat } };
+
+  if (errors.length > 0) {
+    toast('保存已取消，请先修正：\n' + errors.join('\n'), 'error');
+    return;
+  }
+
+  // All valid — apply
+  newResp.forEach(({ u, parsed }) => { u.modelMapping = parsed; });
+  newChat.forEach(({ u, parsed }) => { u.modelMapping = parsed; });
+
+  const data = { codexDesktop: {
+    responsesUpstream: newResp.map(x => x.u),
+    chatUpstream: newChat.map(x => x.u),
+  } };
   await api('/api/save', 'POST', data);
   toast('Codex Desktop 模型映射已保存');
   loadState();
@@ -1200,10 +1274,25 @@ function unifyCCModels() {
   setVal('cc-subagent-model', def);
   toast('已将 Opus/Sonnet/Haiku/Reasoning/Subagent 统一为 ' + def + '，记得保存');
 }
+function normalizeCDBaseUrl() {
+  let v = (getVal('cd-base-url') || '').trim();
+  if (!v) return '';
+  if (!/^https?:\/\//i.test(v)) v = 'https://' + v;   // 自动补协议头
+  v = v.replace(/\/+$/, '');                            // 去末尾多余斜杠
+  setVal('cd-base-url', v);
+  return v;
+}
+
 async function saveClaudeDesktop() {
+  const baseUrl = normalizeCDBaseUrl();
+  // /v1 结尾通常是 OpenAI 协议地址，Claude Desktop 用的是 Anthropic 协议
+  if (/\/v\d+$/.test(baseUrl)) {
+    const ok = confirm('⚠️ Base URL 以 /v' + baseUrl.match(/\/v(\d+)$/)[1] + ' 结尾，这通常是 OpenAI 协议地址。\nClaude Desktop 走的是 Anthropic 协议，多数情况应填不带 /v1 的根地址。\n\n仍要按当前地址保存吗？');
+    if (!ok) return;
+  }
   const data = { claudeDesktop: {
-    baseUrl: getVal('cd-base-url'), apiKey: getVal('cd-api-key'),
-    authScheme: getVal('cd-auth-scheme'), provider: getVal('cd-provider'),
+    baseUrl: baseUrl, apiKey: (getVal('cd-api-key') || '').trim(),
+    authScheme: getVal('cd-auth-scheme'), provider: getVal('cd-provider') || 'gateway',
     egressHosts: getVal('cd-egress'), models: collectCDModels(),
     disableDeploymentChooser: true,
   }};
@@ -1222,31 +1311,42 @@ function fillCDFromClaudeCode() {
 
 // Test whether the current Claude Desktop Base URL + API Key can reach the relay
 async function testCDConnection() {
-  const baseUrl = getVal('cd-base-url');
-  const apiKey = getVal('cd-api-key');
+  const baseUrl = normalizeCDBaseUrl();
+  const apiKey = (getVal('cd-api-key') || '').trim();
+  const authScheme = getVal('cd-auth-scheme') || 'bearer';
   const status = document.getElementById('cd-conn-status');
-  if (!baseUrl || !apiKey) {
+  if (!baseUrl || (!apiKey && authScheme !== 'none')) {
     status.innerHTML = '<span style="color:var(--red);">&#x274c; 请先填写 Base URL 和 API Key</span>';
     return;
   }
-  status.innerHTML = '<span class="loading"></span> 测试中...';
+  // 取模型列表第一个作为测试模型
+  const first = (collectCDModelsArray()[0] || '');
+  if (!first) {
+    status.innerHTML = '<span style="color:var(--red);">&#x274c; 请先在下方模型列表至少填一个模型</span>';
+    return;
+  }
+  status.innerHTML = '<span class="loading"></span> 正在向 /v1/messages 发起测试请求...';
   try {
-    const params = new URLSearchParams({ baseUrl, apiKey });
-    const res = await fetch('/api/models?' + params);
+    const params = new URLSearchParams({ baseUrl, apiKey, model: first, authScheme, maxTokens: '128' });
+    const res = await fetch('/api/test-message?' + params);
     const data = await res.json();
-    if (data.success && data.total > 0) {
-      status.innerHTML = '<span style="color:var(--green);">&#x2705; 连接成功，可用模型 ' + data.total + ' 个</span>';
-    } else if (data.error && /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|fetch failed/i.test(data.error)) {
-      status.innerHTML = '<span style="color:var(--red);">&#x274c; 无法连接：' + esc(data.error) + '（检查地址是否正确、是否需要代理）</span>';
-    } else if (data.error && /401|Invalid token|未授权|unauthorized/i.test(data.error)) {
-      status.innerHTML = '<span style="color:var(--yellow);">&#x26a0; 地址可达但 API Key 无效：' + esc(data.error) + '</span>';
+    if (data.success) {
+      status.innerHTML = '<span style="color:var(--green);">&#x2705; 配置连通正常，模型 ' + esc(first) + ' 可正常调用（HTTP ' + data.status + '）</span>';
     } else {
-      status.innerHTML = '<span style="color:var(--yellow);">&#x26a0; ' + esc(data.error || '未知响应') + '（地址可达，可能该端点不支持列模型，但不影响实际对话）</span>';
+      let html = '<span style="color:var(--red);">&#x274c; 失败' + (data.status ? '（HTTP ' + data.status + '）' : '') + '：' + esc(data.error || '未知错误') + '</span>';
+      if (data.hint) html += '<br><span style="color:var(--yellow);">&#x1f4a1; ' + esc(data.hint) + '</span>';
+      status.innerHTML = html;
     }
   } catch (e) {
-    status.innerHTML = '<span style="color:var(--red);">&#x274c; 测试失败：' + esc(e.message) + '</span>';
+    status.innerHTML = '<span style="color:var(--red);">&#x274c; 请求失败：' + esc(e.message) + '</span>';
   }
 }
+
+// 收集当前模型输入框里的模型名数组（去空格去空行）
+function collectCDModelsArray() {
+  try { return JSON.parse(collectCDModels()).map(m => m.name); } catch (e) { return []; }
+}
+
 
 async function saveCodexCli() {
   const data = { codexCli: {
@@ -1396,6 +1496,11 @@ async function loadGateway() {
     setVal('gw-upstream-url', cfg.upstreamBaseUrl || '');
     setVal('gw-upstream-key', cfg.upstreamApiKey || '');
     setVal('gw-port', cfg.port || 9877);
+    setVal('gw-thinking-mode', cfg.thinkingMode || 'passthrough');
+    setVal('gw-thinking-budget', cfg.thinkingBudget || 10000);
+    const gwLog = document.getElementById('gw-logging');
+    if (gwLog) gwLog.checked = !!cfg.logging;
+    onGWThinkingChange();
     gwRoutes = Object.entries(cfg.routes || {}).map(([k, v]) => ({ anthropic: k, backend: v }));
     renderGWRoutes();
     const status = document.getElementById('gw-status');
@@ -1465,11 +1570,23 @@ function fillGWFromClaudeCode() {
 }
 
 async function saveGateway() {
+  const routes = collectGWRoutes();
+  // Validation: warn about routes whose backend (right column) is empty — these
+  // forward the Anthropic name unchanged, which usually isn't what the user wants.
+  const emptyBackends = routes.filter(r => !r.backend || !r.backend.trim()).map(r => r.anthropic);
+  if (emptyBackends.length > 0) {
+    const ok = confirm('⚠️ 以下映射的「后端模型」为空，将原样转发 Anthropic 模型名（多数中转站会拒绝）：\n\n' +
+      emptyBackends.join('\n') + '\n\n仍要保存吗？');
+    if (!ok) return;
+  }
   const data = {
     upstreamBaseUrl: getVal('gw-upstream-url'),
     upstreamApiKey: getVal('gw-upstream-key'),
     port: getVal('gw-port'),
-    routes: collectGWRoutes(),
+    thinkingMode: getVal('gw-thinking-mode'),
+    thinkingBudget: getVal('gw-thinking-budget'),
+    logging: document.getElementById('gw-logging') ? document.getElementById('gw-logging').checked : false,
+    routes: routes,
   };
   try {
     const res = await api('/api/gateway', 'POST', data);
@@ -1525,6 +1642,110 @@ async function testCCMessage() {
   } catch (e) {
     status.innerHTML = '<span style="color:var(--red);">&#x274c; 请求失败：' + esc(e.message) + '</span>';
   }
+}
+
+// ========== Claude Desktop 多套配置管理 ==========
+let cdConfigList = [];
+
+async function loadCDConfigs() {
+  try {
+    const data = await api('/api/claude-desktop/configs', 'GET');
+    cdConfigList = data.configs || [];
+    const sel = document.getElementById('cd-config-select');
+    if (!sel) return;
+    if (cdConfigList.length === 0) {
+      sel.innerHTML = '<option value="">（无配置，点「新建」创建）</option>';
+      return;
+    }
+    sel.innerHTML = cdConfigList.map(c =>
+      `<option value="${esc(c.id)}" ${c.applied ? 'selected' : ''}>${esc(c.name)}${c.applied ? '（生效中）' : ''} — ${esc(c.baseUrl || '未设地址')}</option>`
+    ).join('');
+  } catch (e) { /* CD 未安装时静默 */ }
+}
+
+async function switchCDConfig() {
+  const id = getVal('cd-config-select');
+  if (!id) return;
+  try {
+    await api('/api/claude-desktop/config/apply', 'POST', { id });
+    toast('已切换生效配置，正在加载…');
+    await loadState();   // 重载表单为新生效配置
+  } catch (e) { toast('切换失败：' + e.message, 'error'); }
+}
+
+async function newCDConfig() {
+  const name = prompt('新配置名称：', '新中转配置');
+  if (name === null) return;
+  try {
+    // 用当前表单内容作为新配置初始值（方便“复制一份再改”）
+    const config = {
+      baseUrl: getVal('cd-base-url'), apiKey: getVal('cd-api-key'),
+      authScheme: getVal('cd-auth-scheme'), provider: getVal('cd-provider') || 'gateway',
+      egressHosts: getVal('cd-egress') || '*', models: collectCDModels(),
+    };
+    const res = await api('/api/claude-desktop/config/create', 'POST', { name, config });
+    await api('/api/claude-desktop/config/apply', 'POST', { id: res.id });
+    toast('已创建并切换到「' + name + '」');
+    await loadState();
+  } catch (e) { toast('创建失败：' + e.message, 'error'); }
+}
+
+async function renameCDConfigUI() {
+  const id = getVal('cd-config-select');
+  if (!id) { toast('请先选择一个配置', 'error'); return; }
+  const cur = cdConfigList.find(c => c.id === id);
+  const name = prompt('重命名配置：', cur ? cur.name : '');
+  if (name === null || !name.trim()) return;
+  try {
+    await api('/api/claude-desktop/config/rename', 'POST', { id, name: name.trim() });
+    toast('已重命名'); await loadCDConfigs();
+  } catch (e) { toast('重命名失败：' + e.message, 'error'); }
+}
+
+async function deleteCDConfigUI() {
+  const id = getVal('cd-config-select');
+  if (!id) { toast('请先选择一个配置', 'error'); return; }
+  const cur = cdConfigList.find(c => c.id === id);
+  if (!confirm('确定删除配置「' + (cur ? cur.name : id) + '」？\n（会自动备份后删除，无法在页面恢复）')) return;
+  try {
+    await api('/api/claude-desktop/config/delete', 'POST', { id });
+    toast('已删除'); await loadState();
+  } catch (e) { toast('删除失败：' + e.message, 'error'); }
+}
+
+function exportCDConfigUI() {
+  const id = getVal('cd-config-select');
+  if (!id) { toast('请先选择一个配置', 'error'); return; }
+  // 询问是否包含密钥：分享/备份给他人时建议去除密钥，避免泄露。
+  // confirm 的「确定」= 含密钥，「取消」= 不含密钥（先单独确认是否导出）。
+  const choice = confirm('导出是否包含 API Key？\n\n点「确定」= 含密钥（完整备份，请勿外传）\n点「取消」= 不含密钥（可安全分享）');
+  const stripKey = choice ? '' : '&stripKey=1';
+  window.location.href = '/api/claude-desktop/config/export?id=' + encodeURIComponent(id) + stripKey;
+  toast(choice ? '正在导出（含密钥）' : '正在导出（已去除密钥）');
+}
+
+async function importCDConfigUI(event) {
+  const file = event.target.files && event.target.files[0];
+  event.target.value = '';   // 允许重复选同一文件
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const parsed = JSON.parse(text);
+    // 兼容两种格式：{name, config:{...}} 或直接是 config 对象
+    const config = parsed.config || parsed;
+    const name = parsed.name || file.name.replace(/\.json$/i, '') || '导入配置';
+    const res = await api('/api/claude-desktop/config/create', 'POST', { name, config });
+    await api('/api/claude-desktop/config/apply', 'POST', { id: res.id });
+    toast('已导入并切换到「' + name + '」');
+    await loadState();
+  } catch (e) { toast('导入失败：' + e.message + '（请确认是有效的配置 JSON）', 'error'); }
+}
+
+// 网关思考兜底：仅「补全」模式显示预算输入
+function onGWThinkingChange() {
+  const mode = getVal('gw-thinking-mode');
+  const wrap = document.getElementById('gw-thinking-budget-wrap');
+  if (wrap) wrap.style.display = (mode === 'inject') ? '' : 'none';
 }
 </script>
 </body>

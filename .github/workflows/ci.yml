@@ -39,3 +39,5 @@ jobs:
             echo 'ERROR: node_modules is tracked'; exit 1
           fi
           echo 'node_modules not tracked'
+      - name: Run tests (TOML roundtrip + gateway integration)
+        run: npm test

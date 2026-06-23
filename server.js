@@ -2,29 +2,76 @@ const http = require('http');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
+const os = require('os');
 const { execSync, spawn } = require('child_process');
 const toml = require('@iarna/toml');
 const net = require('net');
 
 const PORT = 9876;
-const HOME = process.env.USERPROFILE || 'C:\\Users\\admin';
+
+// ========== PLATFORM DETECTION ==========
+// Requirement #5: cross-platform Windows / macOS. We branch on process.platform
+// for config paths (AppData vs ~/Library), process management (tasklist/taskkill
+// vs pgrep/pkill), app launching (spawn exe vs `open -a`), and autostart
+// (Startup-folder VBS vs LaunchAgents plist).
+const IS_WIN = process.platform === 'win32';
+const IS_MAC = process.platform === 'darwin';
+const IS_LINUX = process.platform === 'linux';
+// os.homedir() works on every platform; USERPROFILE was Windows-only.
+const HOME = os.homedir();
 
 // ========== CONFIG FILE PATHS ==========
-const PATHS = {
-  claudeCode: path.join(HOME, '.claude', 'settings.json'),
-  claudeDesktopMeta: path.join(HOME, 'AppData', 'Local', 'Claude-3p', 'configLibrary', '_meta.json'),
-  claudeDesktopDir: path.join(HOME, 'AppData', 'Local', 'Claude-3p', 'configLibrary'),
-  codexCli: path.join(HOME, '.codex', 'config.toml'),
-  codexDesktopConfig: path.join(HOME, 'AppData', 'Roaming', 'ccx-desktop', '.config', 'config.json'),
-  codexDesktopInjection: path.join(HOME, 'AppData', 'Roaming', 'ccx-desktop', 'agent-config-state', 'codex.json'),
-  proxyEnv: path.join(HOME, '.codex', '.env'),
-  clashVergeDir: 'C:\\Program Files\\Clash Verge',
-};
-// Find clash-verge exe
-let clashExe = path.join(PATHS.clashVergeDir, 'Clash Verge.exe');
-if (!fs.existsSync(clashExe)) {
-  const alt = path.join(PATHS.clashVergeDir, 'clash-verge.exe');
-  if (fs.existsSync(alt)) clashExe = alt;
+// Codex paths live under ~/.codex on all platforms. Claude Desktop 3P and Codex
+// Desktop store data in OS-specific app-data dirs, so those branch by platform.
+function macAppSupport(...parts) {
+  return path.join(HOME, 'Library', 'Application Support', ...parts);
+}
+
+const PATHS = (() => {
+  const codexCli = path.join(HOME, '.codex', 'config.toml');
+  const claudeCode = path.join(HOME, '.claude', 'settings.json');
+  const proxyEnv = path.join(HOME, '.codex', '.env');
+
+  if (IS_WIN) {
+    return {
+      claudeCode,
+      claudeDesktopMeta: path.join(HOME, 'AppData', 'Local', 'Claude-3p', 'configLibrary', '_meta.json'),
+      claudeDesktopDir: path.join(HOME, 'AppData', 'Local', 'Claude-3p', 'configLibrary'),
+      codexCli,
+      codexDesktopConfig: path.join(HOME, 'AppData', 'Roaming', 'ccx-desktop', '.config', 'config.json'),
+      codexDesktopInjection: path.join(HOME, 'AppData', 'Roaming', 'ccx-desktop', 'agent-config-state', 'codex.json'),
+      proxyEnv,
+      clashVergeDir: 'C:\\Program Files\\Clash Verge',
+    };
+  }
+  // macOS (and Linux fallback to mac-like layout)
+  return {
+    claudeCode,
+    claudeDesktopMeta: macAppSupport('Claude-3p', 'configLibrary', '_meta.json'),
+    claudeDesktopDir: macAppSupport('Claude-3p', 'configLibrary'),
+    codexCli,
+    codexDesktopConfig: macAppSupport('ccx-desktop', '.config', 'config.json'),
+    codexDesktopInjection: macAppSupport('ccx-desktop', 'agent-config-state', 'codex.json'),
+    proxyEnv,
+    clashVergeDir: '/Applications/Clash Verge.app',
+  };
+})();
+
+// Find clash-verge exe (platform-specific)
+let clashExe = '';
+if (IS_WIN) {
+  clashExe = path.join(PATHS.clashVergeDir, 'Clash Verge.exe');
+  if (!fs.existsSync(clashExe)) {
+    const alt = path.join(PATHS.clashVergeDir, 'clash-verge.exe');
+    if (fs.existsSync(alt)) clashExe = alt;
+  }
+} else if (IS_MAC) {
+  // On macOS the .app bundle is launched via `open -a`; record the bundle path.
+  clashExe = PATHS.clashVergeDir;
+  if (!fs.existsSync(clashExe)) {
+    const alt = path.join(HOME, 'Applications', 'Clash Verge.app');
+    if (fs.existsSync(alt)) clashExe = alt;
+  }
 }
 
 // ========== APP RESTART PATHS ==========
@@ -34,7 +81,7 @@ function detectExe(candidates) {
   return null;
 }
 
-const APPS = {
+const APPS = IS_WIN ? {
   'claude-desktop': {
     name: 'Claude Desktop',
     processes: ['Claude.exe', 'Claude Desktop.exe'],
@@ -56,6 +103,29 @@ const APPS = {
     name: 'Clash Verge',
     processes: ['clash-verge.exe', 'verge-mihomo.exe', 'verge-mihomo-alpha.exe'],
     exe: clashExe,
+  },
+} : {
+  // macOS: processes are matched by name via pgrep; exe is the .app bundle for `open -a`.
+  'claude-desktop': {
+    name: 'Claude Desktop',
+    processes: ['Claude'],
+    exe: detectExe([
+      '/Applications/Claude.app',
+      path.join(HOME, 'Applications', 'Claude.app'),
+    ]),
+  },
+  'codex-desktop': {
+    name: 'Codex Desktop',
+    processes: ['ccx-desktop', 'CCX Desktop'],
+    exe: detectExe([
+      '/Applications/CCX Desktop.app',
+      path.join(HOME, 'Applications', 'CCX Desktop.app'),
+    ]),
+  },
+  'proxy': {
+    name: 'Clash Verge',
+    processes: ['Clash Verge', 'verge-mihomo', 'clash-verge'],
+    exe: clashExe || '/Applications/Clash Verge.app',
   },
 };
 
@@ -83,24 +153,68 @@ function getAppsInfo() {
 }
 
 // ========== AUTO-START ON BOOT ==========
-const STARTUP_DIR = path.join(HOME, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
-const AUTOSTART_VBS = path.join(STARTUP_DIR, 'RelayManager.vbs');
+// Windows: a silent VBS in the Startup folder. macOS: a LaunchAgent plist in
+// ~/Library/LaunchAgents loaded via launchctl.
 const NODE_EXE = process.execPath;
 const SERVER_JS_PATH = path.join(__dirname, 'server.js');
 
+// --- Windows autostart ---
+const STARTUP_DIR = path.join(HOME, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
+const AUTOSTART_VBS = path.join(STARTUP_DIR, 'RelayManager.vbs');
+
+// --- macOS autostart ---
+const LAUNCH_AGENTS_DIR = path.join(HOME, 'Library', 'LaunchAgents');
+const LAUNCH_AGENT_LABEL = 'com.relaymanager.autostart';
+const AUTOSTART_PLIST = path.join(LAUNCH_AGENTS_DIR, LAUNCH_AGENT_LABEL + '.plist');
+
 function isAutostartEnabled() {
-  return fs.existsSync(AUTOSTART_VBS);
+  return IS_WIN ? fs.existsSync(AUTOSTART_VBS) : fs.existsSync(AUTOSTART_PLIST);
 }
+
 function enableAutostart() {
-  fs.mkdirSync(STARTUP_DIR, { recursive: true });
-  const cmd = `"${NODE_EXE}" "${SERVER_JS_PATH}"`;
-  const vbsCmd = '"' + cmd.replace(/"/g, '""') + '"';
-  const vbs = `' RelayManager auto-start (silent, no console window)\r\nCreateObject("WScript.Shell").Run ${vbsCmd}, 0, False\r\n`;
-  fs.writeFileSync(AUTOSTART_VBS, vbs, 'utf-8');
+  if (IS_WIN) {
+    fs.mkdirSync(STARTUP_DIR, { recursive: true });
+    const cmd = `"${NODE_EXE}" "${SERVER_JS_PATH}"`;
+    const vbsCmd = '"' + cmd.replace(/"/g, '""') + '"';
+    const vbs = `' RelayManager auto-start (silent, no console window)\r\nCreateObject("WScript.Shell").Run ${vbsCmd}, 0, False\r\n`;
+    fs.writeFileSync(AUTOSTART_VBS, vbs, 'utf-8');
+    return;
+  }
+  // macOS LaunchAgent
+  fs.mkdirSync(LAUNCH_AGENTS_DIR, { recursive: true });
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${LAUNCH_AGENT_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${NODE_EXE}</string>
+    <string>${SERVER_JS_PATH}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+</dict>
+</plist>
+`;
+  fs.writeFileSync(AUTOSTART_PLIST, plist, 'utf-8');
+  try { execSync(`launchctl load "${AUTOSTART_PLIST}" 2>/dev/null`, { timeout: 5000 }); } catch (e) { /* may already be loaded */ }
 }
+
 function disableAutostart() {
-  try { if (fs.existsSync(AUTOSTART_VBS)) fs.unlinkSync(AUTOSTART_VBS); } catch (e) {}
+  if (IS_WIN) {
+    try { if (fs.existsSync(AUTOSTART_VBS)) fs.unlinkSync(AUTOSTART_VBS); } catch (e) {}
+    return;
+  }
+  try { execSync(`launchctl unload "${AUTOSTART_PLIST}" 2>/dev/null`, { timeout: 5000 }); } catch (e) {}
+  try { if (fs.existsSync(AUTOSTART_PLIST)) fs.unlinkSync(AUTOSTART_PLIST); } catch (e) {}
 }
+
+// Backward-compat alias used by the autostart status endpoint.
+const AUTOSTART_PATH = IS_WIN ? AUTOSTART_VBS : AUTOSTART_PLIST;
 
 // ========== UTILITY FUNCTIONS ==========
 
@@ -341,70 +455,200 @@ async function ensureClaudeOnboardingSkipped() {
   await atomicWrite(dotClaude, JSON.stringify(obj, null, 2) + '\n');
 }
 
+// Normalize a Base URL for Claude Desktop 3P: trim, prepend https:// if no
+// scheme, strip trailing slashes. Never append /v1 or /messages — 3P passes the
+// URL through verbatim, so we keep exactly what the user typed (minus cruft).
+function normalizeBaseUrl(raw) {
+  let v = (raw || '').trim();
+  if (!v) return '';
+  if (!/^https?:\/\//i.test(v)) v = 'https://' + v;
+  return v.replace(/\/+$/, '');
+}
+
+// inferenceModels is a STRINGIFIED JSON array of {name} objects (real 3P format).
+// Accept either that string or a plain array; trim each name, drop blanks.
+function normalizeInferenceModels(models) {
+  let arr = [];
+  try {
+    const parsed = typeof models === 'string' ? JSON.parse(models || '[]') : models;
+    if (Array.isArray(parsed)) {
+      arr = parsed
+        .map(m => (typeof m === 'string' ? m : (m && m.name) || ''))
+        .map(s => String(s).trim())
+        .filter(Boolean)
+        .map(name => ({ name }));
+    }
+  } catch (e) { arr = []; }
+  return JSON.stringify(arr);
+}
+
 async function writeClaudeDesktop(data) {
   const meta = readJSON(PATHS.claudeDesktopMeta);
   if (!meta || !meta.appliedId) throw new Error('Claude Desktop 3P config not found (_meta.json missing)');
   const configId = meta.appliedId;
   const filePath = path.join(PATHS.claudeDesktopDir, `${configId}.json`);
   let obj = readJSON(filePath) || {};
-  if (data.apiKey !== undefined) obj.inferenceGatewayApiKey = data.apiKey;
-  if (data.baseUrl !== undefined) obj.inferenceGatewayBaseUrl = data.baseUrl;
+  if (data.apiKey !== undefined) obj.inferenceGatewayApiKey = (data.apiKey || '').trim();
+  if (data.baseUrl !== undefined) obj.inferenceGatewayBaseUrl = normalizeBaseUrl(data.baseUrl);
   if (data.authScheme !== undefined) obj.inferenceGatewayAuthScheme = data.authScheme;
-  if (data.provider !== undefined) obj.inferenceProvider = data.provider;
-  if (data.models !== undefined) obj.inferenceModels = data.models; // Keep as JSON string
+  if (data.provider !== undefined) obj.inferenceProvider = data.provider || 'gateway';
+  if (data.models !== undefined) obj.inferenceModels = normalizeInferenceModels(data.models);
   if (data.egressHosts !== undefined) obj.coworkEgressAllowedHosts = data.egressHosts.split(',').map(s => s.trim()).filter(Boolean);
   if (data.disableDeploymentChooser !== undefined) obj.disableDeploymentModeChooser = data.disableDeploymentChooser;
   await backupFile(filePath);
   await atomicWrite(filePath, JSON.stringify(obj, null, 2) + '\n');
 }
 
+// ========== CLAUDE DESKTOP 3P — MULTI-CONFIG MANAGEMENT ==========
+// _meta.json = { appliedId, entries:[{id,name}] }; each config is <id>.json.
+// Managing multiple gateways = managing that entries list + switching appliedId.
+
+function readCDMeta() {
+  return readJSON(PATHS.claudeDesktopMeta) || { appliedId: '', entries: [] };
+}
+async function writeCDMeta(meta) {
+  if (!fs.existsSync(PATHS.claudeDesktopDir)) fs.mkdirSync(PATHS.claudeDesktopDir, { recursive: true });
+  await backupFile(PATHS.claudeDesktopMeta);
+  await atomicWrite(PATHS.claudeDesktopMeta, JSON.stringify(meta, null, 2) + '\n');
+}
+function cdConfigPath(id) { return path.join(PATHS.claudeDesktopDir, id + '.json'); }
+
+// Whitelist to official fields only — custom fields make Claude Desktop reject
+// the config. Accepts either raw inference* fields or the form's short names.
+function sanitizeCDConfig(d) {
+  d = d || {};
+  const egress = Array.isArray(d.coworkEgressAllowedHosts)
+    ? d.coworkEgressAllowedHosts
+    : (typeof d.egressHosts === 'string'
+        ? d.egressHosts.split(',').map(x => x.trim()).filter(Boolean)
+        : (typeof d.allowedEgressHosts !== 'undefined' && Array.isArray(d.allowedEgressHosts) ? d.allowedEgressHosts : ['*']));
+  return {
+    coworkEgressAllowedHosts: egress.length ? egress : ['*'],
+    disableDeploymentModeChooser: d.disableDeploymentModeChooser !== false,
+    inferenceGatewayApiKey: String(d.inferenceGatewayApiKey || d.apiKey || '').trim(),
+    inferenceGatewayAuthScheme: d.inferenceGatewayAuthScheme || d.authScheme || 'bearer',
+    inferenceGatewayBaseUrl: normalizeBaseUrl(d.inferenceGatewayBaseUrl || d.baseUrl || ''),
+    inferenceProvider: d.inferenceProvider || d.provider || 'gateway',
+    inferenceModels: normalizeInferenceModels(d.inferenceModels || d.models || '[]'),
+  };
+}
+
+function listCDConfigs() {
+  const meta = readCDMeta();
+  const entries = Array.isArray(meta.entries) ? meta.entries : [];
+  const configs = entries.map(e => {
+    const obj = readJSON(cdConfigPath(e.id)) || {};
+    let models = [];
+    try { models = JSON.parse(obj.inferenceModels || '[]').map(m => m.name || m); } catch (x) {}
+    return {
+      id: e.id, name: e.name || '(未命名)',
+      baseUrl: obj.inferenceGatewayBaseUrl || '',
+      authScheme: obj.inferenceGatewayAuthScheme || 'bearer',
+      models, applied: e.id === meta.appliedId,
+    };
+  });
+  return { appliedId: meta.appliedId || '', configs };
+}
+
+async function createCDConfig(name, configData) {
+  const meta = readCDMeta();
+  if (!Array.isArray(meta.entries)) meta.entries = [];
+  const id = require('crypto').randomUUID();
+  if (!fs.existsSync(PATHS.claudeDesktopDir)) fs.mkdirSync(PATHS.claudeDesktopDir, { recursive: true });
+  await atomicWrite(cdConfigPath(id), JSON.stringify(sanitizeCDConfig(configData), null, 2) + '\n');
+  meta.entries.push({ id, name: name || '新配置' });
+  if (!meta.appliedId) meta.appliedId = id;   // first config becomes active
+  await writeCDMeta(meta);
+  return id;
+}
+
+async function applyCDConfig(id) {
+  const meta = readCDMeta();
+  if (!(meta.entries || []).some(e => e.id === id)) throw new Error('配置不存在: ' + id);
+  meta.appliedId = id;
+  await writeCDMeta(meta);
+  return id;
+}
+
+async function deleteCDConfig(id) {
+  const meta = readCDMeta();
+  meta.entries = (meta.entries || []).filter(e => e.id !== id);
+  try { if (fs.existsSync(cdConfigPath(id))) { await backupFile(cdConfigPath(id)); fs.unlinkSync(cdConfigPath(id)); } } catch (e) {}
+  if (meta.appliedId === id) meta.appliedId = meta.entries[0] ? meta.entries[0].id : '';
+  await writeCDMeta(meta);
+  return meta.appliedId;
+}
+
+async function renameCDConfig(id, name) {
+  const meta = readCDMeta();
+  const e = (meta.entries || []).find(x => x.id === id);
+  if (!e) throw new Error('配置不存在');
+  e.name = name || e.name;
+  await writeCDMeta(meta);
+}
+
+function exportCDConfig(id, stripKey) {
+  const meta = readCDMeta();
+  const e = (meta.entries || []).find(x => x.id === id);
+  const obj = readJSON(cdConfigPath(id)) || {};
+  // Optionally redact the API key so exported/shared config files don't leak secrets.
+  if (stripKey && obj && obj.inferenceGatewayApiKey) {
+    obj.inferenceGatewayApiKey = '';
+  }
+  return { name: e ? e.name : '导出配置', config: obj };
+}
+
 async function writeCodexCli(data) {
   const filePath = PATHS.codexCli;
-  let raw = fs.readFileSync(filePath, 'utf-8');
 
-  // Helper: replace or append a key=value under a section
-  function setTomlValue(section, key, value) {
-    const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    let valStr;
-    if (typeof value === 'boolean') valStr = String(value);
-    else if (typeof value === 'string') valStr = `"${value}"`;
-    else valStr = String(value);
-
-    if (section) {
-      // Find the section header, then find the key after it (before next section or EOF)
-      const sectionEscaped = section.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const sectionRegex = new RegExp(`(\\[${sectionEscaped}\\][^\\[]*?)(${escapedKey}\\s*=\\s*)([^\\n]*)`, 's');
-      if (sectionRegex.test(raw)) {
-        raw = raw.replace(sectionRegex, `$1$2${valStr}`);
-      } else {
-        // Key not found in section — append after the section header
-        const appendRegex = new RegExp(`(\\[${sectionEscaped}\\]\\s*\\n)`, 's');
-        if (appendRegex.test(raw)) {
-          raw = raw.replace(appendRegex, `$1${key} = ${valStr}\n`);
-        }
-      }
-    } else {
-      // Top-level key
-      const topRegex = new RegExp(`^(${escapedKey}\\s*=\\s*)([^\\n]*)`, 'm');
-      if (topRegex.test(raw)) {
-        raw = raw.replace(topRegex, `$1${valStr}`);
-      } else {
-        raw += `\n${key} = ${valStr}\n`;
-      }
+  // Parse the existing TOML into an object, modify it, then re-stringify. This is
+  // far more robust than the old regex approach, which corrupted files containing
+  // comments, nested tables, or multi-line values. The trade-off: @iarna/toml's
+  // stringify drops comments. We mitigate by preserving the file structure as an
+  // object and only touching the keys we manage.
+  let obj = {};
+  let hadFile = false;
+  try {
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    obj = toml.parse(raw);
+    hadFile = true;
+  } catch (e) {
+    if (e.code !== 'ENOENT') {
+      // File exists but is malformed — don't clobber it blindly.
+      throw new Error('Codex config.toml 解析失败，未做修改以免损坏：' + e.message);
     }
+    obj = {}; // fresh file
   }
 
-  setTomlValue('model_providers.custom', 'base_url', data.baseUrl || '');
-  setTomlValue('model_providers.custom', 'experimental_bearer_token', data.apiKey || '');
-  if (data.model) setTomlValue(null, 'model', data.model);
-  if (data.modelProvider) setTomlValue(null, 'model_provider', data.modelProvider);
-  if (data.reasoningEffort) setTomlValue(null, 'model_reasoning_effort', data.reasoningEffort);
-  if (data.providerName) setTomlValue('model_providers.custom', 'name', data.providerName);
-  if (data.wireApi !== undefined) setTomlValue('model_providers.custom', 'wire_api', data.wireApi);
-  if (data.requiresOpenaiAuth !== undefined) setTomlValue('model_providers.custom', 'requires_openai_auth', data.requiresOpenaiAuth);
+  // Ensure the nested provider table exists: [model_providers.custom]
+  if (!obj.model_providers || typeof obj.model_providers !== 'object') obj.model_providers = {};
+  if (!obj.model_providers.custom || typeof obj.model_providers.custom !== 'object') obj.model_providers.custom = {};
+  const custom = obj.model_providers.custom;
 
-  await backupFile(filePath);
-  await atomicWrite(filePath, raw);
+  // Provider-scoped keys
+  custom.base_url = (data.baseUrl || '').trim();
+  custom.experimental_bearer_token = (data.apiKey || '').trim();
+  if (data.providerName !== undefined) custom.name = data.providerName;
+  if (data.wireApi !== undefined) custom.wire_api = data.wireApi;
+  if (data.requiresOpenaiAuth !== undefined) custom.requires_openai_auth = !!data.requiresOpenaiAuth;
+
+  // Top-level keys
+  if (data.model) obj.model = data.model;
+  if (data.modelProvider) obj.model_provider = data.modelProvider;
+  if (data.reasoningEffort) obj.model_reasoning_effort = data.reasoningEffort;
+
+  // Stringify back to TOML. @iarna/toml handles escaping/quoting correctly.
+  let out;
+  try {
+    out = toml.stringify(obj);
+  } catch (e) {
+    throw new Error('Codex 配置序列化失败：' + e.message);
+  }
+
+  if (hadFile) await backupFile(filePath);
+  // Make sure the directory exists (fresh install case).
+  await fsp.mkdir(path.dirname(filePath), { recursive: true });
+  await atomicWrite(filePath, out);
 }
 
 async function writeCodexDesktop(data) {
@@ -457,48 +701,58 @@ ${wsOn ? `WS_PROXY=${proxyUrl}\nws_proxy=${proxyUrl}\n` : ''}${wssOn ? `WSS_PROX
 
 // ========== PROXY MANAGEMENT ==========
 
+// Cross-platform check: is a process whose name matches `name` currently running?
+function isProcessRunning(name) {
+  try {
+    if (IS_WIN) {
+      const out = execSync(`tasklist /FI "IMAGENAME eq ${name}" /FO CSV /NH 2>nul`, { encoding: 'utf-8', timeout: 3000 });
+      return out.toLowerCase().includes(name.toLowerCase());
+    }
+    // macOS / Linux: pgrep -f matches against the full command line, -x against
+    // the exact process name. Use -f so app-bundle names with spaces still match.
+    const out = execSync(`pgrep -f ${JSON.stringify(name)} 2>/dev/null`, { encoding: 'utf-8', timeout: 3000 });
+    return out.trim().length > 0;
+  } catch (e) { return false; }
+}
+
+// Cross-platform check: is something LISTENING on `port`?
+function isPortListening(port) {
+  try {
+    if (IS_WIN) {
+      const result = execSync(`netstat -ano 2>nul | findstr ":${port} " | findstr "LISTENING"`, { encoding: 'utf-8', timeout: 2000 });
+      return !!result.trim();
+    }
+    // macOS / Linux: lsof is the most reliable. -nP avoids slow DNS/port lookups.
+    const result = execSync(`lsof -nP -iTCP:${port} -sTCP:LISTEN 2>/dev/null`, { encoding: 'utf-8', timeout: 3000 });
+    return !!result.trim();
+  } catch (e) { return false; }
+}
+
 function checkProxyStatus() {
   const port = (readProxy()).proxyPort || '7897';
+  const names = APPS.proxy ? APPS.proxy.processes : (IS_WIN ? ['clash-verge.exe', 'verge-mihomo.exe'] : ['Clash Verge', 'verge-mihomo']);
   let processRunning = false;
-  try {
-    const out = execSync('tasklist /FI "IMAGENAME eq clash-verge.exe" /FO CSV /NH 2>nul', { encoding: 'utf-8', timeout: 3000 });
-    if (out.includes('clash-verge.exe')) processRunning = true;
-  } catch (e) { /* not running */ }
-  try {
-    const out = execSync('tasklist /FI "IMAGENAME eq verge-mihomo.exe" /FO CSV /NH 2>nul', { encoding: 'utf-8', timeout: 3000 });
-    if (out.includes('verge-mihomo.exe')) processRunning = true;
-  } catch (e) { /* not running */ }
-
-  // Synchronous port check via netstat. (A previous version also created a
-  // net.Socket here, but the async connect could never settle before the
-  // synchronous execSync below returned, so it was dead code — removed.)
-  let portListening = false;
-  try {
-    const result = execSync(`netstat -ano 2>nul | findstr ":${port} " | findstr "LISTENING"`, { encoding: 'utf-8', timeout: 2000 });
-    if (result.trim()) portListening = true;
-  } catch (e) { portListening = false; }
-
+  for (const name of names) {
+    if (isProcessRunning(name)) { processRunning = true; break; }
+  }
+  const portListening = isPortListening(port);
   return { processRunning, portListening, port: parseInt(port) };
 }
 
 function startProxy() {
-  if (!fs.existsSync(clashExe)) {
-    throw new Error(`Clash Verge not found at: ${clashExe}`);
+  if (!clashExe || !fs.existsSync(clashExe)) {
+    throw new Error(`Clash Verge not found at: ${clashExe || '(未配置路径)'}`);
   }
-  const proc = spawn(clashExe, [], { detached: true, stdio: 'ignore', windowsHide: false });
-  proc.unref();
-  return { pid: proc.pid, exe: clashExe };
+  launchApp(clashExe);
+  return { exe: clashExe };
 }
 
 function stopProxy() {
   const results = [];
-  for (const name of ['clash-verge.exe', 'verge-mihomo.exe', 'verge-mihomo-alpha.exe']) {
-    try {
-      const out = execSync(`taskkill /f /im "${name}" 2>nul`, { encoding: 'utf-8', timeout: 5000 });
-      results.push({ process: name, result: out.trim() || 'terminated' });
-    } catch (e) {
-      results.push({ process: name, result: 'not running' });
-    }
+  const names = APPS.proxy ? APPS.proxy.processes : ['clash-verge.exe', 'verge-mihomo.exe', 'verge-mihomo-alpha.exe'];
+  for (const name of names) {
+    const ok = killProcessByName(name);
+    results.push({ process: name, result: ok ? 'terminated' : 'not running' });
   }
   return results;
 }
@@ -582,51 +836,78 @@ async function writeClaudeDesktopPrep(data) {
 
 // ========== APP RESTART ==========
 
-function findProcesses(names) {
-  const found = [];
-  for (const name of names) {
-    try {
-      const out = execSync(`tasklist /FI "IMAGENAME eq ${name}" /FO CSV /NH 2>nul`, { encoding: 'utf-8', timeout: 3000 });
-      for (const line of out.trim().split('\n')) {
-        const m = line.match(/"([^"]+)","(\d+)"/);
-        if (m) found.push({ name: m[1], pid: parseInt(m[2]) });
-      }
-    } catch (e) {}
+// Cross-platform: kill all processes matching `name`. Returns true if the kill
+// command succeeded (process existed), false otherwise.
+function killProcessByName(name) {
+  try {
+    if (IS_WIN) {
+      execSync(`taskkill /f /im "${name}" 2>nul`, { encoding: 'utf-8', timeout: 5000 });
+      return true;
+    }
+    // macOS / Linux: pkill -f matches the full command line. Exit code 0 = killed,
+    // 1 = no match. execSync throws on non-zero, so the catch handles "not running".
+    execSync(`pkill -f ${JSON.stringify(name)} 2>/dev/null`, { encoding: 'utf-8', timeout: 5000 });
+    return true;
+  } catch (e) {
+    return false;
   }
-  return found;
 }
 
 function killApp(processNames) {
   const killed = [];
   for (const name of processNames) {
-    try {
-      execSync(`taskkill /f /im "${name}" 2>nul`, { encoding: 'utf-8', timeout: 5000 });
-      killed.push(name);
-    } catch (e) {}
+    if (killProcessByName(name)) killed.push(name);
   }
   return killed;
 }
 
-function startApp(exePath) {
+// Cross-platform app launcher. On Windows we spawn the exe directly; on macOS we
+// use `open -a "/path/App.app"` (or `open <bundle>`) which is the correct way to
+// launch a .app bundle. Returns { pid } when available.
+function launchApp(exePath) {
   if (!exePath || !fs.existsSync(exePath)) throw new Error('App not found: ' + exePath);
-  const proc = spawn(exePath, [], { detached: true, stdio: 'ignore', windowsHide: false });
+  if (IS_WIN) {
+    const proc = spawn(exePath, [], { detached: true, stdio: 'ignore', windowsHide: false });
+    proc.unref();
+    return { pid: proc.pid };
+  }
+  // macOS: `open` returns immediately; it has no meaningful child PID for the app.
+  if (IS_MAC) {
+    const proc = spawn('open', [exePath], { detached: true, stdio: 'ignore' });
+    proc.unref();
+    return { pid: null };
+  }
+  // Linux fallback
+  const proc = spawn(exePath, [], { detached: true, stdio: 'ignore' });
   proc.unref();
   return { pid: proc.pid };
+}
+
+// Backward-compat alias.
+function startApp(exePath) { return launchApp(exePath); }
+
+// Sleep briefly so the OS releases the killed app before relaunch.
+function sleepSync(ms) {
+  if (IS_WIN) {
+    try { execSync(`timeout /t ${Math.ceil(ms / 1000)} /nobreak >nul 2>&1`, { timeout: ms + 1000 }); } catch (e) {}
+  } else {
+    try { execSync(`sleep ${(ms / 1000).toFixed(1)}`, { timeout: ms + 1000 }); } catch (e) {}
+  }
 }
 
 function restartApp(product) {
   const app = APPS[product];
   if (!app) throw new Error('Unknown product: ' + product);
   const killed = killApp(app.processes);
-  execSync('timeout /t 1 /nobreak >nul 2>&1', { timeout: 2000 });
-  // If we have a valid exe path, relaunch; otherwise just kill (user reopens manually)
+  sleepSync(1000);
+  // If we have a valid exe/bundle path, relaunch; otherwise just kill (user reopens manually)
   if (app.exe && fs.existsSync(app.exe)) {
-    const started = startApp(app.exe);
+    const started = launchApp(app.exe);
     return { product, name: app.name, killed, pid: started.pid, relaunched: true };
   }
   return {
     product, name: app.name, killed, relaunched: false,
-    warning: '未配置 ' + app.name + ' 的 exe 路径，已关闭进程但无法自动重启。请在「应用路径」中填写 exe 路径，或手动重新打开 ' + app.name + '。',
+    warning: '未配置 ' + app.name + ' 的程序路径，已关闭进程但无法自动重启。请在「应用路径」中填写路径，或手动重新打开 ' + app.name + '。',
   };
 }
 
@@ -641,17 +922,86 @@ const GATEWAY_DEFAULT_PORT = 9877;
 function readGatewayConfig() {
   try { return JSON.parse(fs.readFileSync(GATEWAY_CONFIG_FILE, 'utf-8')); }
   catch (e) {
-    return { port: GATEWAY_DEFAULT_PORT, upstreamBaseUrl: '', upstreamApiKey: '', routes: {} };
+    return { port: GATEWAY_DEFAULT_PORT, upstreamBaseUrl: '', upstreamApiKey: '', routes: {}, thinkingMode: 'passthrough', thinkingBudget: 10000 };
   }
 }
 async function writeGatewayConfig(cfg) {
   await atomicWrite(GATEWAY_CONFIG_FILE, JSON.stringify(cfg, null, 2) + '\n');
 }
 
-function forwardToUpstream(req, clientRes, reqPath, body, cfg) {
+// Build a Claude/Anthropic-shaped error object so clients can parse gateway errors.
+function anthropicError(message, type) {
+  return { type: 'error', error: { type: type || 'api_error', message: String(message) } };
+}
+
+// Privacy-respecting gateway request log. Honors cfg.logging (default off). Records
+// ONLY model rewrite + path + timestamp — never the request body, messages, or keys,
+// per the "do not cache user data" requirement. Rolls at ~2000 lines.
+const GATEWAY_LOG_FILE = path.join(__dirname, 'gateway-requests.log');
+function gatewayLog(cfg, info) {
+  if (!cfg || !cfg.logging) return;
+  try {
+    const line = JSON.stringify({
+      ts: new Date().toISOString(),
+      path: info.path,
+      model: info.originalModel || '',
+      mappedTo: info.mappedModel || '',
+      rewritten: info.originalModel !== info.mappedModel,
+    }) + '\n';
+    fs.appendFileSync(GATEWAY_LOG_FILE, line, 'utf-8');
+    // Best-effort roll: if the file gets large, truncate to the last ~1000 lines.
+    const stat = fs.statSync(GATEWAY_LOG_FILE);
+    if (stat.size > 512 * 1024) {
+      const lines = fs.readFileSync(GATEWAY_LOG_FILE, 'utf-8').split('\n');
+      fs.writeFileSync(GATEWAY_LOG_FILE, lines.slice(-1000).join('\n'), 'utf-8');
+    }
+  } catch (e) { /* logging is best-effort, never break the request */ }
+}
+
+// Gateway compatibility shim — the core value of the local gateway. Auto-fills or
+// strips the `thinking` field and adapts incompatible params per gateway config,
+// so third-party upstreams that require (or reject) thinking just work.
+//   thinkingMode: 'passthrough' (default, do nothing) | 'inject' | 'strip'
+function applyGatewayCompat(parsed, cfg, routeKey) {
+  const mode = cfg.thinkingMode || 'passthrough';
+  if (mode === 'passthrough') return;
+  if (!parsed || !Array.isArray(parsed.messages)) return; // only messages-style payloads
+  if (mode === 'strip') {
+    delete parsed.thinking;
+    // Also remove any thinking-related headers that might have been added
+    return;
+  }
+  if (mode === 'inject' && !parsed.thinking) {
+    // Per-route thinking budget: if a specific route has a budget, use it
+    let budget = parseInt(cfg.thinkingBudget) || 10000;
+    if (cfg.routeBudgets && cfg.routeBudgets[routeKey]) {
+      budget = parseInt(cfg.routeBudgets[routeKey]);
+    }
+    if (budget <= 0) budget = 10000; // fallback
+
+    parsed.thinking = { type: 'enabled', budget_tokens: budget };
+    // Anthropic requires max_tokens > budget_tokens when thinking is enabled.
+    // Increase if necessary, but don't decrease if user set a higher value
+    if (!parsed.max_tokens || parsed.max_tokens <= budget) {
+      parsed.max_tokens = budget + 1024;
+    }
+    // Extended thinking forbids non-default temperature/top_p/top_k — drop them
+    // (only if they weren't explicitly set to non-default values)
+    if (parsed.temperature !== undefined && parsed.temperature !== 1) {
+      // User set a custom temperature — keep it but warn (could affect quality)
+      // We'll allow it but note it might not be honored by all upstreams
+    }
+    // Actually, per Anthropic spec, we should remove temperature/top_p/top_k for thinking
+    delete parsed.temperature;
+    delete parsed.top_p;
+    delete parsed.top_k;
+  }
+}
+
+function forwardToUpstream(req, clientRes, reqPath, body, cfg, routeKey) {
   if (!cfg.upstreamBaseUrl) {
     clientRes.writeHead(502, { 'Content-Type': 'application/json' });
-    clientRes.end(JSON.stringify({ error: { message: 'Relay gateway: 上游中转站未配置，请在 RelayManager 中设置' } }));
+    clientRes.end(JSON.stringify(anthropicError('上游中转站未配置，请在 RelayManager 中设置', 'gateway_not_configured')));
     return;
   }
   const upstream = new URL(cfg.upstreamBaseUrl);
@@ -664,6 +1014,14 @@ function forwardToUpstream(req, clientRes, reqPath, body, cfg) {
   headers['x-api-key'] = cfg.upstreamApiKey || '';
   headers['host'] = upstream.host;
   headers['content-length'] = String(Buffer.byteLength(body));
+  // Drop accept-encoding so the upstream returns plain text — lets us normalize
+  // error bodies and stream SSE without dealing with gzip mid-stream.
+  delete headers['accept-encoding'];
+
+  // Timeout for non-streaming requests (streaming can take very long)
+  const UPSTREAM_TIMEOUT_MS = 120000; // 2 minutes for non-stream
+  const STREAM_TIMEOUT_MS = 600000;   // 10 minutes for streaming
+
   const upstreamReq = httpMod.request({
     protocol: upstream.protocol,
     hostname: upstream.hostname,
@@ -671,18 +1029,218 @@ function forwardToUpstream(req, clientRes, reqPath, body, cfg) {
     path: fullPath,
     method: req.method,
     headers,
+    timeout: STREAM_TIMEOUT_MS, // Set initial timeout, will adjust for streaming
   }, (upstreamRes) => {
-    clientRes.writeHead(upstreamRes.statusCode, upstreamRes.headers);
-    upstreamRes.pipe(clientRes); // stream response (supports SSE)
+    const status = upstreamRes.statusCode || 502;
+    const isStream = /text\/event-stream/i.test(String(upstreamRes.headers['content-type'] || ''));
+    const contentType = upstreamRes.headers['content-type'] || '';
+
+    // Error responses: buffer + normalize to Anthropic error shape (don't stream).
+    if (status >= 400) {
+      let errBody = '';
+      upstreamRes.on('data', c => errBody += c);
+      upstreamRes.on('end', () => {
+        let payload;
+        try {
+          const p = JSON.parse(errBody);
+          // Try to extract Anthropic-style error
+          if (p && p.error) {
+            // Already in Anthropic format
+            payload = {
+              type: 'error',
+              error: {
+                type: p.error.type || 'upstream_error',
+                message: p.error.message || p.error || ('HTTP ' + status)
+              }
+            };
+          } else {
+            // Non-Anthropic error format - normalize it
+            const msg = p && (p.message || p.error || p.msg || (typeof p === 'string' ? p : ''));
+            const errType = classifyUpstreamError(status, msg, contentType);
+            payload = anthropicError(msg || ('上游返回 HTTP ' + status), errType);
+          }
+        } catch (e) {
+          // Non-JSON error body
+          const errType = classifyUpstreamError(status, errBody, contentType);
+          payload = anthropicError((errBody || '').slice(0, 500) || ('上游返回 HTTP ' + status), errType);
+        }
+        try {
+          if (!clientRes.headersSent) clientRes.writeHead(status, { 'Content-Type': 'application/json' });
+          clientRes.end(JSON.stringify(payload));
+        } catch (_) {}
+      });
+      upstreamRes.on('error', () => { try { clientRes.end(); } catch (_) {} });
+      return;
+    }
+
+    // Success response
+    const responseHeaders = { ...upstreamRes.headers };
+
+    // For streaming responses, ensure proper SSE headers
+    if (isStream) {
+      responseHeaders['x-accel-buffering'] = 'no';
+      responseHeaders['cache-control'] = 'no-cache';
+      responseHeaders['connection'] = 'keep-alive';
+    }
+
+    try { clientRes.writeHead(status, responseHeaders); } catch (_) {}
+
+    // ========== SSE STREAMING ROBUSTNESS ==========
+    if (isStream) {
+      // Reset timeout for streaming (keepalive)
+      upstreamReq.setTimeout(STREAM_TIMEOUT_MS, () => {
+        // Long timeout for streaming - just log, don't abort
+        // console.log('Stream keepalive ping');
+      });
+
+      // Heartbeat to prevent intermediate proxies from closing the connection
+      let heartbeatTimer;
+      const HEARTBEAT_INTERVAL = 25000; // 25 seconds - under most proxy timeouts
+
+      function sendHeartbeat() {
+        try {
+          if (!clientRes.writableEnded) {
+            clientRes.write(': heartbeat\n\n');
+          }
+        } catch (_) {}
+      }
+
+      // Start heartbeat
+      heartbeatTimer = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL);
+
+      // Handle stream data
+      upstreamRes.on('data', (chunk) => {
+        // Forward chunk as-is
+        try {
+          if (!clientRes.writableEnded) {
+            clientRes.write(chunk);
+          }
+        } catch (_) {}
+      });
+
+      // Handle stream end
+      upstreamRes.on('end', () => {
+        clearInterval(heartbeatTimer);
+        // Send final SSE termination if not already ended
+        try {
+          if (!clientRes.writableEnded) {
+            clientRes.write('event: done\ndata: [DONE]\n\n');
+            clientRes.end();
+          }
+        } catch (_) {
+          try { clientRes.end(); } catch (_) {}
+        }
+      });
+
+      // Handle upstream abort (client disconnected or upstream error mid-stream)
+      upstreamRes.on('error', (e) => {
+        clearInterval(heartbeatTimer);
+        // Don't log full error (might contain sensitive info), just categorize
+        const isAbort = e.message && /aborted|reset|closed/i.test(e.message);
+        if (!isAbort) {
+          console.error('Upstream stream error:', e.code);
+        }
+
+        // Send proper SSE error event if possible
+        if (!clientRes.writableEnded) {
+          try {
+            const errPayload = anthropicError(
+              isAbort ? '上游连接中断' : ('流式响应错误: ' + e.code),
+              'upstream_stream_error'
+            );
+            clientRes.write('event: error\ndata: ' + JSON.stringify(errPayload) + '\n\n');
+            clientRes.end();
+          } catch (_) {
+            try { clientRes.end(); } catch (_) {}
+          }
+        }
+      });
+
+      // Handle client disconnect (upstreamReq cleanup)
+      clientRes.on('close', () => {
+        clearInterval(heartbeatTimer);
+        if (upstreamReq && !upstreamReq.destroyed) {
+          upstreamReq.destroy();
+        }
+      });
+
+    } else {
+      // Non-streaming: pipe through with timeout
+      upstreamRes.setTimeout(UPSTREAM_TIMEOUT_MS, () => {
+        upstreamReq.destroy();
+        if (!clientRes.headersSent) {
+          clientRes.writeHead(504, { 'Content-Type': 'application/json' });
+          clientRes.end(JSON.stringify(anthropicError('上游响应超时', 'upstream_timeout')));
+        }
+      });
+
+      upstreamRes.pipe(clientRes, { end: true });
+    }
+
+    // Mid-stream upstream failure: emit a proper SSE error event so the client
+    // sees a clean termination instead of a silently truncated stream.
+    upstreamRes.on('error', (e) => {
+      // Already handled above for streaming, but add for non-streaming
+      if (!isStream) {
+        try {
+          if (!clientRes.headersSent) {
+            clientRes.writeHead(502, { 'Content-Type': 'application/json' });
+            clientRes.end(JSON.stringify(anthropicError('上游响应错误', 'upstream_error')));
+          } else {
+            clientRes.end();
+          }
+        } catch (_) {}
+      }
+    });
   });
+
+  // Client hung up: abort the upstream request so we don't waste relay quota.
+  clientRes.on('close', () => { if (upstreamReq && !upstreamReq.destroyed) upstreamReq.destroy(); });
+
   upstreamReq.on('error', (e) => {
     try {
-      clientRes.writeHead(502, { 'Content-Type': 'application/json' });
-      clientRes.end(JSON.stringify({ error: { message: 'Relay gateway upstream error: ' + e.message } }));
+      if (!clientRes.headersSent) {
+        const errType = classifyConnectionError(e);
+        clientRes.writeHead(502, { 'Content-Type': 'application/json' });
+        clientRes.end(JSON.stringify(anthropicError('网关无法连接上游: ' + errType, errType)));
+      } else { clientRes.end(); }
     } catch (_) {}
   });
+
+  // Handle request timeout
+  upstreamReq.on('timeout', () => {
+    upstreamReq.destroy();
+    try {
+      if (!clientRes.headersSent) {
+        clientRes.writeHead(504, { 'Content-Type': 'application/json' });
+        clientRes.end(JSON.stringify(anthropicError('请求超时', 'request_timeout')));
+      } else { clientRes.end(); }
+    } catch (_) {}
+  });
+
   upstreamReq.write(body);
   upstreamReq.end();
+}
+
+// Classify upstream HTTP errors for better error messages
+function classifyUpstreamError(status, msg, contentType) {
+  const m = (msg || '').toLowerCase();
+  if (/thinking|budget|max_thinking/i.test(m)) return 'thinking_unsupported';
+  if (/model.*not.*found|model.*invalid|model.*not.*support/i.test(m)) return 'model_not_found';
+  if (/auth|token|key|unauthorized|forbidden/i.test(m)) return 'authentication_error';
+  if (status === 429) return 'rate_limit';
+  if (status >= 500) return 'upstream_server_error';
+  if (/content.*type|json.*parse|invalid.*request/i.test(m)) return 'invalid_request';
+  return 'upstream_error';
+}
+
+// Classify connection errors for better error messages
+function classifyConnectionError(e) {
+  if (/ECONNREFUSED/i.test(e.code)) return '连接被拒绝，请检查中转站地址';
+  if (/ENOTFOUND|ENETUNREACH/i.test(e.code)) return '无法解析域名，请检查中转站地址';
+  if (/ETIMEDOUT|CONNECTIMEOUT/i.test(e.code)) return '连接超时，请检查网络或代理设置';
+  if (/CERTIFICATE|SSL|TLS/i.test(e.code)) return 'SSL 证书错误，可能需要检查 HTTPS 配置';
+  return '连接错误';
 }
 
 function startGatewayServer() {
@@ -728,14 +1286,20 @@ function startGatewayServer() {
       req.on('data', c => body += c);
       req.on('end', () => {
         let outBody = body;
+        let originalModel = '', mappedModel = '';
         try {
           const parsed = JSON.parse(body);
+          originalModel = parsed.model || '';
           if (parsed.model && routes[parsed.model]) {
             parsed.model = routes[parsed.model]; // Anthropic name -> backend model
           }
+          mappedModel = parsed.model || '';
+          applyGatewayCompat(parsed, currentCfg, originalModel); // thinking auto-fill / strip + param adapt
           outBody = JSON.stringify(parsed);
         } catch (e) { /* non-JSON, forward as-is */ }
-        forwardToUpstream(req, res, u.pathname + u.search, outBody, currentCfg);
+        // Privacy-respecting log: only model names + path, never body/key.
+        gatewayLog(currentCfg, { path: u.pathname, originalModel, mappedModel });
+        forwardToUpstream(req, res, u.pathname + u.search, outBody, currentCfg, originalModel);
       });
       return;
     }
@@ -813,7 +1377,10 @@ function fetchModelsFromAPI(baseUrl, apiKey) {
 // Real end-to-end connectivity test: send an actual POST /v1/messages (the same
 // endpoint Claude Code uses) so we catch gateway problems that /v1/models misses
 // (thinking-field rejection, auth-header mismatch, model-name validation, etc.).
-function testMessageAPI(baseUrl, apiKey, model) {
+function testMessageAPI(baseUrl, apiKey, model, opts) {
+  opts = opts || {};
+  const authScheme = opts.authScheme;        // 'bearer' | 'x-api-key' | 'none' | undefined(=both)
+  const maxTokens = opts.maxTokens || 16;
   return new Promise((resolve) => {
     let u;
     try { u = new URL(baseUrl); } catch (e) { return resolve({ error: 'Base URL 格式无效: ' + baseUrl }); }
@@ -823,7 +1390,7 @@ function testMessageAPI(baseUrl, apiKey, model) {
       : u.origin + (apiPath || '') + '/v1/messages';
     const payload = JSON.stringify({
       model: model || 'claude-3-5-sonnet-20241022',
-      max_tokens: 16,
+      max_tokens: maxTokens,
       messages: [{ role: 'user', content: 'ping' }],
     });
     const httpModule = u.protocol === 'https:' ? require('https') : require('http');
@@ -835,8 +1402,13 @@ function testMessageAPI(baseUrl, apiKey, model) {
       path: target.pathname + target.search,
       method: 'POST',
       headers: {
-        'Authorization': 'Bearer ' + apiKey,   // Bearer scheme
-        'x-api-key': apiKey,                    // x-api-key scheme (dual auth)
+        // Auth header(s) depend on the chosen scheme. Claude Desktop lets the
+        // user pick bearer / x-api-key / none; Claude Code's probe leaves it
+        // undefined and sends both for maximum compatibility.
+        ...(authScheme === 'bearer'    ? { 'Authorization': 'Bearer ' + apiKey } :
+            authScheme === 'x-api-key' ? { 'x-api-key': apiKey } :
+            authScheme === 'none'      ? {} :
+            { 'Authorization': 'Bearer ' + apiKey, 'x-api-key': apiKey }),
         'anthropic-version': '2023-06-01',
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(payload),
@@ -875,9 +1447,10 @@ function testMessageAPI(baseUrl, apiKey, model) {
         let hint = '';
         if (/client.*detect|unauthorized client|client.*not.*allow|forbidden client/i.test(msg)) hint = '中转站检测到「非法客户端」——它在校验 User-Agent 等客户端指纹。本测试已模拟 Claude Code 客户端头；若仍失败，多为该中转站限制了非官方调用，请联系中转站确认是否允许 Claude Code 接入，或换一个中转站。';
         else if (code === 401 || code === 403 || /invalid.*key|unauthor|token/i.test(msg)) hint = 'API Key 无效或认证方式不被接受（已同时尝试 Bearer 和 x-api-key），请检查 Key 是否正确、是否过期或额度用尽';
-        else if (/model/i.test(msg) && /not.*found|invalid|不存在|无权/i.test(msg)) hint = '模型名不被中转站接受，请检查分层模型映射填的名字';
+        else if (/model/i.test(msg) && /not.*found|invalid|不存在|无权/i.test(msg)) hint = '模型名不被网关接受，请核对模型名与网关支持的是否完全一致（网关只认 claude- 开头官方名时，不能填第三方原生模型名）';
         else if (/thinking|budget|max_thinking/i.test(msg)) hint = '中转站不兼容 thinking 字段，请把「思考模式」切到「关闭思考」';
-        else if (code === 404) hint = '/v1/messages 接口 404，Base URL 可能错误（注意是否该带 /anthropic 后缀）';
+        else if (code === 400) hint = '请求格式不兼容（HTTP 400）：通常是模型名不被网关支持，或网关协议适配有问题；也可能是该网关要求补 thinking 等字段。请核对模型名是否与网关完全一致。';
+        else if (code === 404) hint = 'Base URL 路径错误（HTTP 404）：/v1/messages 不存在，请确认填的是 Anthropic 兼容端点（注意是否该带 /anthropic 后缀，且不要自己拼 /v1）';
         else if (code >= 500) hint = '中转站服务端错误，稍后重试或换线路';
         resolve({ error: msg, status: code, hint });
       });
@@ -990,8 +1563,10 @@ const server = http.createServer(async (req, res) => {
         backups.push('claude-code-settings.json');
       }
       if (data.claudeDesktop) {
-        const bp = await writeClaudeDesktopPrep(data.claudeDesktop);
-        if (bp) backups.push(bp);
+        // Full save (authScheme/provider/models/egress + normalization). The
+        // lightweight writeClaudeDesktopPrep is only for sync-all / quick-fill.
+        await writeClaudeDesktop(data.claudeDesktop);
+        backups.push('claude-desktop-config.json');
       }
       if (data.codexCli) {
         await writeCodexCli(data.codexCli);
@@ -1069,11 +1644,13 @@ const server = http.createServer(async (req, res) => {
       const baseUrl = url.searchParams.get('baseUrl');
       const apiKey = url.searchParams.get('apiKey');
       const model = url.searchParams.get('model') || '';
-      if (!baseUrl || !apiKey) {
+      const authScheme = url.searchParams.get('authScheme') || undefined;
+      const maxTokens = parseInt(url.searchParams.get('maxTokens')) || 16;
+      if (!baseUrl || (!apiKey && authScheme !== 'none')) {
         const r = error('Missing baseUrl or apiKey query parameter', 400);
         res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
       }
-      const result = await testMessageAPI(baseUrl, apiKey, model);
+      const result = await testMessageAPI(baseUrl, apiKey, model, { authScheme, maxTokens });
       const r = json(result);
       res.writeHead(r.code, { 'Content-Type': r.type });
       res.end(r.body);
@@ -1107,7 +1684,7 @@ const server = http.createServer(async (req, res) => {
 
     // GET /api/autostart — check if auto-start is enabled
     if (method === 'GET' && url.pathname === '/api/autostart') {
-      const r = json({ enabled: isAutostartEnabled(), vbsPath: AUTOSTART_VBS });
+      const r = json({ enabled: isAutostartEnabled(), vbsPath: AUTOSTART_PATH, platform: process.platform });
       res.writeHead(r.code, { 'Content-Type': r.type });
       res.end(r.body);
       return;
@@ -1118,7 +1695,7 @@ const server = http.createServer(async (req, res) => {
       const data = JSON.parse(body || '{}');
       if (data.enabled) {
         enableAutostart();
-        const r = json({ success: true, enabled: true, vbsPath: AUTOSTART_VBS });
+        const r = json({ success: true, enabled: true, vbsPath: AUTOSTART_PATH });
         res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
       } else {
         disableAutostart();
@@ -1161,6 +1738,9 @@ const server = http.createServer(async (req, res) => {
       if (data.upstreamBaseUrl !== undefined) cfg.upstreamBaseUrl = data.upstreamBaseUrl;
       if (data.upstreamApiKey !== undefined) cfg.upstreamApiKey = data.upstreamApiKey;
       if (data.port !== undefined) cfg.port = parseInt(data.port) || GATEWAY_DEFAULT_PORT;
+      if (data.thinkingMode !== undefined) cfg.thinkingMode = data.thinkingMode;
+      if (data.thinkingBudget !== undefined) cfg.thinkingBudget = parseInt(data.thinkingBudget) || 10000;
+      if (data.logging !== undefined) cfg.logging = !!data.logging;
       if (data.routes !== undefined) {
         // routes come as array of {anthropic, backend} from frontend
         const routes = {};
@@ -1202,6 +1782,56 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // ===== Claude Desktop 3P multi-config management =====
+    // GET /api/claude-desktop/configs — list all configs + which is applied
+    if (method === 'GET' && url.pathname === '/api/claude-desktop/configs') {
+      const r = json(listCDConfigs());
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+    // POST /api/claude-desktop/config/create — { name, config? } (config? = import payload)
+    if (method === 'POST' && url.pathname === '/api/claude-desktop/config/create') {
+      const data = JSON.parse(body || '{}');
+      const id = await createCDConfig(data.name, data.config);
+      const r = json({ success: true, id, configs: listCDConfigs() });
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+    // POST /api/claude-desktop/config/apply — { id }
+    if (method === 'POST' && url.pathname === '/api/claude-desktop/config/apply') {
+      const data = JSON.parse(body || '{}');
+      await applyCDConfig(data.id);
+      const r = json({ success: true, configs: listCDConfigs() });
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+    // POST /api/claude-desktop/config/delete — { id }
+    if (method === 'POST' && url.pathname === '/api/claude-desktop/config/delete') {
+      const data = JSON.parse(body || '{}');
+      const appliedId = await deleteCDConfig(data.id);
+      const r = json({ success: true, appliedId, configs: listCDConfigs() });
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+    // POST /api/claude-desktop/config/rename — { id, name }
+    if (method === 'POST' && url.pathname === '/api/claude-desktop/config/rename') {
+      const data = JSON.parse(body || '{}');
+      await renameCDConfig(data.id, data.name);
+      const r = json({ success: true, configs: listCDConfigs() });
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+    // GET /api/claude-desktop/config/export?id=...&stripKey=1 — download portable JSON
+    if (method === 'GET' && url.pathname === '/api/claude-desktop/config/export') {
+      const id = url.searchParams.get('id');
+      if (!id) { const r = error('Missing id', 400); res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return; }
+      const stripKey = url.searchParams.get('stripKey') === '1';
+      const payload = exportCDConfig(id, stripKey);
+      const suffix = stripKey ? '-nokey' : '';
+      const fname = 'claude-desktop-' + (payload.name || 'config').replace(/[^\w.-]+/g, '_') + suffix + '.json';
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Disposition': 'attachment; filename="' + fname + '"',
+      });
+      res.end(JSON.stringify(payload, null, 2));
+      return;
+    }
+
     // 404
     const r = error('Not found', 404);
     res.writeHead(r.code, { 'Content-Type': r.type });
@@ -1220,7 +1850,8 @@ const server = http.createServer(async (req, res) => {
 // other devices on the LAN. The relay gateway already binds to 127.0.0.1 too.
 server.on('error', (e) => {
   if (e.code === 'EADDRINUSE') {
-    console.error(`端口 ${PORT} 已被占用 —— RelayManager 可能已在运行。请先关闭已有实例（双击「停止.bat」），或修改 server.js 顶部的 PORT。`);
+    const stopHint = IS_WIN ? '双击「停止.bat」' : '运行 ./stop.sh 或 kill 已有进程';
+    console.error(`端口 ${PORT} 已被占用 —— RelayManager 可能已在运行。请先关闭已有实例（${stopHint}），或修改 server.js 顶部的 PORT。`);
     process.exit(1);
   }
   console.error('Server error:', e.message);
@@ -1228,7 +1859,8 @@ server.on('error', (e) => {
 });
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`RelayManager running at http://localhost:${PORT}`);
+  console.log(`Platform: ${process.platform} (${IS_WIN ? 'Windows' : IS_MAC ? 'macOS' : 'Linux'})`);
   console.log(`Config path: ${PATHS.claudeCode}`);
-  console.log(`Clash Verge: ${clashExe} (${fs.existsSync(clashExe) ? 'found' : 'NOT FOUND'})`);
+  console.log(`Clash Verge: ${clashExe || '(未检测到)'} (${clashExe && fs.existsSync(clashExe) ? 'found' : 'NOT FOUND'})`);
   startGatewayServer();
 });
