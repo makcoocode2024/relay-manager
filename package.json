@@ -6,9 +6,15 @@
   "scripts": {
     "start": "node server.js",
     "check": "node --check server.js",
-    "test": "node test/toml.test.js && node test/gateway.test.js"
+    "test": "node test/toml.test.js && node test/gateway.test.js && node test/features.test.js"
   },
-  "keywords": ["claude", "codex", "relay", "proxy", "gateway"],
+  "keywords": [
+    "claude",
+    "codex",
+    "relay",
+    "proxy",
+    "gateway"
+  ],
   "author": "",
   "license": "MIT",
   "type": "commonjs",

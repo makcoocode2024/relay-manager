@@ -18,3 +18,6 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# 本地 agent / 编辑器设置
+.claude/

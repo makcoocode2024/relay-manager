@@ -6,6 +6,7 @@ const os = require('os');
 const { execSync, spawn } = require('child_process');
 const toml = require('@iarna/toml');
 const net = require('net');
+const debugLog = require('./lib/debugLog');
 
 const PORT = 9876;
 
@@ -911,7 +912,97 @@ function restartApp(product) {
   };
 }
 
-// ========== RELAY GATEWAY (model-name rewriting proxy) ==========
+// ========== PROCESS STATUS (feature #6) ==========
+// Return { running, pid } for a managed product by checking its process names.
+function getProcessStatus(product) {
+  const app = APPS[product];
+  if (!app) return { running: false, pid: null, error: 'unknown product: ' + product };
+  for (const name of app.processes) {
+    const pid = findFirstPid(name);
+    if (pid) return { running: true, pid, name, product };
+  }
+  return { running: false, pid: null, product };
+}
+
+// Cross-platform: return the first PID matching `name`, or null.
+function findFirstPid(name) {
+  try {
+    if (IS_WIN) {
+      const out = execSync(`tasklist /FI "IMAGENAME eq ${name}" /FO CSV /NH 2>nul`, { encoding: 'utf-8', timeout: 3000 });
+      const m = out.match(/"[^"]+","(\d+)"/);
+      return m ? parseInt(m[1]) : null;
+    }
+    const out = execSync(`pgrep -f ${JSON.stringify(name)} 2>/dev/null`, { encoding: 'utf-8', timeout: 3000 });
+    const first = out.trim().split('\n')[0];
+    return first ? parseInt(first) : null;
+  } catch (e) { return null; }
+}
+
+// ========== CONFIG HISTORY & ROLLBACK (feature #5) ==========
+// Map a product key to its live config file path. Claude Desktop resolves the
+// currently-applied config via _meta.json.
+function productToConfigPath(product) {
+  switch (product) {
+    case 'claude-code': return PATHS.claudeCode;
+    case 'codex-cli': return PATHS.codexCli;
+    case 'codex-desktop': return PATHS.codexDesktopConfig;
+    case 'claude-desktop': {
+      const meta = readJSON(PATHS.claudeDesktopMeta);
+      if (!meta || !meta.appliedId) return null;
+      return path.join(PATHS.claudeDesktopDir, meta.appliedId + '.json');
+    }
+    default: return null;
+  }
+}
+
+// List timestamped backups for a product's config (from its backups/ dir).
+function listConfigHistory(product) {
+  const filePath = productToConfigPath(product);
+  if (!filePath) return { product, configPath: '', backups: [] };
+  const dir = path.dirname(filePath);
+  const ext = path.extname(filePath);
+  const baseName = path.basename(filePath, ext);
+  const backupDir = path.join(dir, 'backups');
+  const items = [];
+  try {
+    const prefix = baseName + '-';
+    for (const f of fs.readdirSync(backupDir)) {
+      if (!f.startsWith(prefix) || !f.endsWith(ext)) continue;
+      let mtime = null;
+      try { mtime = fs.statSync(path.join(backupDir, f)).mtime.toISOString(); } catch (e) {}
+      items.push({ filename: f, mtime });
+    }
+  } catch (e) { /* no backups dir yet */ }
+  // Newest first (timestamp in name is lexicographically sortable)
+  items.sort((a, b) => b.filename.localeCompare(a.filename));
+  return { product, configPath: filePath, backups: items };
+}
+
+// Roll back a product's live config to a chosen backup, then restart its client.
+// The current config is itself backed up first, so rollback is reversible.
+async function rollbackConfig(product, filename) {
+  const filePath = productToConfigPath(product);
+  if (!filePath) throw new Error('无法定位该产品的配置文件: ' + product);
+  if (!filename || /[\\/]|\.\./.test(filename)) throw new Error('非法的备份文件名');
+  const backupDir = path.join(path.dirname(filePath), 'backups');
+  const src = path.join(backupDir, filename);
+  // Confine to the backups dir (defense in depth against traversal).
+  if (path.dirname(path.resolve(src)) !== path.resolve(backupDir)) throw new Error('备份路径越界');
+  if (!fs.existsSync(src)) throw new Error('备份文件不存在: ' + filename);
+  // Back up the current file before overwriting, so the rollback is reversible.
+  await backupFile(filePath);
+  const content = fs.readFileSync(src, 'utf-8');
+  await atomicWrite(filePath, content);
+  // Restart the matching client if we manage one for this product.
+  let restart = null;
+  const restartKey = product === 'claude-desktop' ? 'claude-desktop' : (product === 'codex-desktop' ? 'codex-desktop' : null);
+  if (restartKey && APPS[restartKey]) {
+    try { restart = restartApp(restartKey); } catch (e) { restart = { error: e.message }; }
+  }
+  return { product, rolledBackTo: filename, configPath: filePath, restart };
+}
+
+
 // Replaces CC Switch's local gateway. Claude Desktop sends Anthropic model names
 // (e.g. claude-sonnet-4-5) here; the gateway rewrites them to backend models
 // (e.g. glm-5.2) per user config, then forwards to the real relay.
@@ -920,10 +1011,33 @@ const GATEWAY_CONFIG_FILE = path.join(__dirname, 'gateway.json');
 const GATEWAY_DEFAULT_PORT = 9877;
 
 function readGatewayConfig() {
-  try { return JSON.parse(fs.readFileSync(GATEWAY_CONFIG_FILE, 'utf-8')); }
-  catch (e) {
-    return { port: GATEWAY_DEFAULT_PORT, upstreamBaseUrl: '', upstreamApiKey: '', routes: {}, thinkingMode: 'passthrough', thinkingBudget: 10000 };
-  }
+  let cfg;
+  try { cfg = JSON.parse(fs.readFileSync(GATEWAY_CONFIG_FILE, 'utf-8')); }
+  catch (e) { cfg = {}; }
+  // Apply defaults so callers don't have to null-check. `network` holds the
+  // advanced settings (feature #3); they hot-reload because the gateway reads
+  // config fresh on every request.
+  return {
+    port: cfg.port || GATEWAY_DEFAULT_PORT,
+    upstreamBaseUrl: cfg.upstreamBaseUrl || '',
+    upstreamApiKey: cfg.upstreamApiKey || '',
+    routes: cfg.routes || {},
+    thinkingMode: cfg.thinkingMode || 'passthrough',
+    thinkingBudget: cfg.thinkingBudget || 10000,
+    logging: !!cfg.logging,
+    network: {
+      requestTimeoutSec: numOr(cfg.network && cfg.network.requestTimeoutSec, 0),   // connect/overall; 0 = no extra cap
+      readTimeoutSec: numOr(cfg.network && cfg.network.readTimeoutSec, 0),         // idle socket timeout; 0 = default
+      maxRetries: numOr(cfg.network && cfg.network.maxRetries, 0),                 // extra attempts on failure
+      retryBackoffMs: numOr(cfg.network && cfg.network.retryBackoffMs, 500),       // base backoff between retries
+      customHeaders: (cfg.network && cfg.network.customHeaders && typeof cfg.network.customHeaders === 'object') ? cfg.network.customHeaders : {},
+    },
+  };
+}
+// Coerce to a finite non-negative number or fall back to `def`.
+function numOr(v, def) {
+  const n = parseInt(v);
+  return Number.isFinite(n) && n >= 0 ? n : def;
 }
 async function writeGatewayConfig(cfg) {
   await atomicWrite(GATEWAY_CONFIG_FILE, JSON.stringify(cfg, null, 2) + '\n');
@@ -964,14 +1078,14 @@ function gatewayLog(cfg, info) {
 //   thinkingMode: 'passthrough' (default, do nothing) | 'inject' | 'strip'
 function applyGatewayCompat(parsed, cfg, routeKey) {
   const mode = cfg.thinkingMode || 'passthrough';
-  if (mode === 'passthrough') return;
-  if (!parsed || !Array.isArray(parsed.messages)) return; // only messages-style payloads
+  if (mode === 'passthrough') return { applied: false, reason: 'passthrough' };
+  if (!parsed || !Array.isArray(parsed.messages)) return { applied: false, reason: 'no_messages' };
   if (mode === 'strip') {
     delete parsed.thinking;
     // Also remove any thinking-related headers that might have been added
-    return;
+    return { applied: true, reason: 'stripped' };
   }
-  if (mode === 'inject' && !parsed.thinking) {
+  if (mode === 'inject') {
     // Per-route thinking budget: if a specific route has a budget, use it
     let budget = parseInt(cfg.thinkingBudget) || 10000;
     if (cfg.routeBudgets && cfg.routeBudgets[routeKey]) {
@@ -979,6 +1093,7 @@ function applyGatewayCompat(parsed, cfg, routeKey) {
     }
     if (budget <= 0) budget = 10000; // fallback
 
+    const hadThinking = !!parsed.thinking;
     parsed.thinking = { type: 'enabled', budget_tokens: budget };
     // Anthropic requires max_tokens > budget_tokens when thinking is enabled.
     // Increase if necessary, but don't decrease if user set a higher value
@@ -995,7 +1110,9 @@ function applyGatewayCompat(parsed, cfg, routeKey) {
     delete parsed.temperature;
     delete parsed.top_p;
     delete parsed.top_k;
+    return { applied: true, reason: hadThinking ? 'preserved' : 'injected', budget };
   }
+  return { applied: false, reason: 'unknown_mode' };
 }
 
 function forwardToUpstream(req, clientRes, reqPath, body, cfg, routeKey) {
@@ -1004,222 +1121,216 @@ function forwardToUpstream(req, clientRes, reqPath, body, cfg, routeKey) {
     clientRes.end(JSON.stringify(anthropicError('上游中转站未配置，请在 RelayManager 中设置', 'gateway_not_configured')));
     return;
   }
-  const upstream = new URL(cfg.upstreamBaseUrl);
-  const isHttps = upstream.protocol === 'https:';
-  const httpMod = isHttps ? require('https') : require('http');
-  const base = upstream.pathname.replace(/\/+$/, '');
-  const fullPath = base + reqPath;
-  const headers = { ...req.headers };
-  headers['authorization'] = 'Bearer ' + (cfg.upstreamApiKey || '');
-  headers['x-api-key'] = cfg.upstreamApiKey || '';
-  headers['host'] = upstream.host;
-  headers['content-length'] = String(Buffer.byteLength(body));
-  // Drop accept-encoding so the upstream returns plain text — lets us normalize
-  // error bodies and stream SSE without dealing with gzip mid-stream.
-  delete headers['accept-encoding'];
+  const net = cfg.network || {};
+  const maxRetries = numOr(net.maxRetries, 0);
+  const retryBackoffMs = numOr(net.retryBackoffMs, 500);
+  const started = Date.now();
+  const debugStream = false; // verbose stream tracing toggle (kept off in prod)
 
-  // Timeout for non-streaming requests (streaming can take very long)
-  const UPSTREAM_TIMEOUT_MS = 120000; // 2 minutes for non-stream
-  const STREAM_TIMEOUT_MS = 600000;   // 10 minutes for streaming
+  // Try once; on a connection-level failure (not an HTTP error from upstream,
+  // and only before any bytes were sent to the client) retry up to maxRetries.
+  attempt(0);
 
-  const upstreamReq = httpMod.request({
-    protocol: upstream.protocol,
-    hostname: upstream.hostname,
-    port: upstream.port || (isHttps ? 443 : 80),
-    path: fullPath,
-    method: req.method,
-    headers,
-    timeout: STREAM_TIMEOUT_MS, // Set initial timeout, will adjust for streaming
-  }, (upstreamRes) => {
-    const status = upstreamRes.statusCode || 502;
-    const isStream = /text\/event-stream/i.test(String(upstreamRes.headers['content-type'] || ''));
-    const contentType = upstreamRes.headers['content-type'] || '';
-
-    // Error responses: buffer + normalize to Anthropic error shape (don't stream).
-    if (status >= 400) {
-      let errBody = '';
-      upstreamRes.on('data', c => errBody += c);
-      upstreamRes.on('end', () => {
-        let payload;
-        try {
-          const p = JSON.parse(errBody);
-          // Try to extract Anthropic-style error
-          if (p && p.error) {
-            // Already in Anthropic format
-            payload = {
-              type: 'error',
-              error: {
-                type: p.error.type || 'upstream_error',
-                message: p.error.message || p.error || ('HTTP ' + status)
-              }
-            };
-          } else {
-            // Non-Anthropic error format - normalize it
-            const msg = p && (p.message || p.error || p.msg || (typeof p === 'string' ? p : ''));
-            const errType = classifyUpstreamError(status, msg, contentType);
-            payload = anthropicError(msg || ('上游返回 HTTP ' + status), errType);
-          }
-        } catch (e) {
-          // Non-JSON error body
-          const errType = classifyUpstreamError(status, errBody, contentType);
-          payload = anthropicError((errBody || '').slice(0, 500) || ('上游返回 HTTP ' + status), errType);
+  function attempt(tryNum) {
+    const upstream = new URL(cfg.upstreamBaseUrl);
+    const isHttps = upstream.protocol === 'https:';
+    const httpMod = isHttps ? require('https') : require('http');
+    const base = upstream.pathname.replace(/\/+$/, '');
+    const fullPath = base + reqPath;
+    const headers = { ...req.headers };
+    headers['authorization'] = 'Bearer ' + (cfg.upstreamApiKey || '');
+    headers['x-api-key'] = cfg.upstreamApiKey || '';
+    headers['host'] = upstream.host;
+    headers['content-length'] = String(Buffer.byteLength(body));
+    delete headers['accept-encoding'];
+    // Advanced: append user-defined custom headers (feature #3). Applied last so
+    // they can override defaults if the user really wants to.
+    if (net.customHeaders && typeof net.customHeaders === 'object') {
+      for (const k of Object.keys(net.customHeaders)) {
+        if (k && net.customHeaders[k] !== undefined && net.customHeaders[k] !== '') {
+          headers[k] = String(net.customHeaders[k]);
         }
-        try {
-          if (!clientRes.headersSent) clientRes.writeHead(status, { 'Content-Type': 'application/json' });
-          clientRes.end(JSON.stringify(payload));
-        } catch (_) {}
-      });
-      upstreamRes.on('error', () => { try { clientRes.end(); } catch (_) {} });
-      return;
+      }
     }
 
-    // Success response
-    const responseHeaders = { ...upstreamRes.headers };
+    // Timeouts. requestTimeoutSec caps the whole non-stream request; readTimeoutSec
+    // is the idle socket timeout. 0 = use built-in defaults (stream-friendly).
+    const reqTimeoutMs = net.requestTimeoutSec > 0 ? net.requestTimeoutSec * 1000 : 120000;
+    const STREAM_TIMEOUT_MS = 600000;
+    const readTimeoutMs = net.readTimeoutSec > 0 ? net.readTimeoutSec * 1000 : 0;
 
-    // For streaming responses, ensure proper SSE headers
-    if (isStream) {
-      responseHeaders['x-accel-buffering'] = 'no';
-      responseHeaders['cache-control'] = 'no-cache';
-      responseHeaders['connection'] = 'keep-alive';
+    let sentToClient = false; // once true, we can't safely retry
+
+    function logResult(status, errorMessage) {
+      if (cfg.logging || true) { // always feed the in-memory debug ring (it's redacted + capped)
+        debugLog.addLog({
+          method: req.method,
+          url: reqPath,
+          status: status,
+          duration_ms: Date.now() - started,
+          error_message: errorMessage || '',
+          model: routeKey || '',
+          mappedTo: (cfg.routes && cfg.routes[routeKey]) || '',
+        });
+      }
+      // Also feed the optional on-disk privacy log if enabled.
+      gatewayLog(cfg, { path: reqPath, originalModel: routeKey, mappedModel: (cfg.routes && cfg.routes[routeKey]) || routeKey });
     }
 
-    try { clientRes.writeHead(status, responseHeaders); } catch (_) {}
+    function maybeRetry(reason) {
+      if (!sentToClient && tryNum < maxRetries) {
+        const delay = retryBackoffMs * (tryNum + 1); // linear backoff
+        setTimeout(() => attempt(tryNum + 1), delay);
+        return true;
+      }
+      return false;
+    }
 
-    // ========== SSE STREAMING ROBUSTNESS ==========
-    if (isStream) {
-      // Reset timeout for streaming (keepalive)
-      upstreamReq.setTimeout(STREAM_TIMEOUT_MS, () => {
-        // Long timeout for streaming - just log, don't abort
-        // console.log('Stream keepalive ping');
-      });
+    const upstreamReq = httpMod.request({
+      protocol: upstream.protocol,
+      hostname: upstream.hostname,
+      port: upstream.port || (isHttps ? 443 : 80),
+      path: fullPath,
+      method: req.method,
+      headers,
+      timeout: STREAM_TIMEOUT_MS,
+    }, (upstreamRes) => {
+      const status = upstreamRes.statusCode || 502;
+      const isStream = /text\/event-stream/i.test(String(upstreamRes.headers['content-type'] || ''));
+      const contentType = upstreamRes.headers['content-type'] || '';
 
-      // Heartbeat to prevent intermediate proxies from closing the connection
-      let heartbeatTimer;
-      const HEARTBEAT_INTERVAL = 25000; // 25 seconds - under most proxy timeouts
-
-      function sendHeartbeat() {
-        try {
-          if (!clientRes.writableEnded) {
-            clientRes.write(': heartbeat\n\n');
+      // Error responses: buffer + normalize to Anthropic error shape (don't stream).
+      if (status >= 400) {
+        let errBody = '';
+        upstreamRes.on('data', c => errBody += c);
+        upstreamRes.on('end', () => {
+          let payload;
+          try {
+            const p = JSON.parse(errBody);
+            if (p && p.error) {
+              payload = { type: 'error', error: { type: p.error.type || 'upstream_error', message: p.error.message || p.error || ('HTTP ' + status) } };
+            } else {
+              const msg = p && (p.message || p.error || p.msg || (typeof p === 'string' ? p : ''));
+              payload = anthropicError(msg || ('上游返回 HTTP ' + status), classifyUpstreamError(status, msg, contentType));
+            }
+          } catch (e) {
+            payload = anthropicError((errBody || '').slice(0, 500) || ('上游返回 HTTP ' + status), classifyUpstreamError(status, errBody, contentType));
           }
-        } catch (_) {}
+          logResult(status, payload.error && payload.error.message);
+          try {
+            sentToClient = true;
+            if (!clientRes.headersSent) clientRes.writeHead(status, { 'Content-Type': 'application/json' });
+            clientRes.end(JSON.stringify(payload));
+          } catch (_) {}
+        });
+        upstreamRes.on('error', () => { try { clientRes.end(); } catch (_) {} });
+        return;
       }
 
-      // Start heartbeat
-      heartbeatTimer = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL);
+      // Success response
+      sentToClient = true;
+      const responseHeaders = { ...upstreamRes.headers };
+      if (isStream) {
+        responseHeaders['x-accel-buffering'] = 'no';
+        responseHeaders['cache-control'] = 'no-cache';
+        responseHeaders['connection'] = 'keep-alive';
+      }
+      try { clientRes.writeHead(status, responseHeaders); } catch (_) {}
 
-      // Handle stream data
-      upstreamRes.on('data', (chunk) => {
-        // Forward chunk as-is
-        try {
+      // ========== SSE STREAMING ROBUSTNESS ==========
+      if (isStream) {
+        upstreamReq.setTimeout(STREAM_TIMEOUT_MS, () => {});
+        let heartbeatTimer;
+        const HEARTBEAT_INTERVAL = 25000;
+        const sendHeartbeat = () => { try { if (!clientRes.writableEnded) clientRes.write(': heartbeat\n\n'); } catch (_) {} };
+        heartbeatTimer = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL);
+
+        let streamBytes = 0;
+        let streamChunks = 0;
+        upstreamRes.on('data', (chunk) => {
+          streamBytes += Buffer.byteLength(chunk);
+          streamChunks += 1;
+          if (debugStream) console.error('[gw] stream chunk', { routeKey, status, streamChunks, streamBytes });
+          try { if (!clientRes.writableEnded) clientRes.write(chunk); } catch (_) {}
+        });
+        upstreamRes.on('end', () => {
+          clearInterval(heartbeatTimer);
+          if (debugStream) console.error('[gw] stream end', { routeKey, status, streamChunks, streamBytes });
+          logResult(status, '');
+          try { if (!clientRes.writableEnded) { clientRes.write('event: done\ndata: [DONE]\n\n'); clientRes.end(); } }
+          catch (_) { try { clientRes.end(); } catch (_) {} }
+        });
+        upstreamRes.on('error', (e) => {
+          clearInterval(heartbeatTimer);
+          const isAbort = e.message && /aborted|reset|closed/i.test(e.message);
+          if (!isAbort) console.error('Upstream stream error:', e.code);
+          if (debugStream) console.error('[gw] stream error', { routeKey, status, code: e.code, message: e.message, streamChunks, streamBytes });
+          logResult(status, 'stream_error: ' + (e.code || e.message));
           if (!clientRes.writableEnded) {
-            clientRes.write(chunk);
+            try {
+              const errPayload = anthropicError(isAbort ? '上游连接中断' : ('流式响应错误: ' + e.code), 'upstream_stream_error');
+              clientRes.write('event: error\ndata: ' + JSON.stringify(errPayload) + '\n\n');
+              clientRes.end();
+            } catch (_) { try { clientRes.end(); } catch (_) {} }
           }
-        } catch (_) {}
-      });
-
-      // Handle stream end
-      upstreamRes.on('end', () => {
-        clearInterval(heartbeatTimer);
-        // Send final SSE termination if not already ended
-        try {
-          if (!clientRes.writableEnded) {
-            clientRes.write('event: done\ndata: [DONE]\n\n');
-            clientRes.end();
-          }
-        } catch (_) {
-          try { clientRes.end(); } catch (_) {}
-        }
-      });
-
-      // Handle upstream abort (client disconnected or upstream error mid-stream)
-      upstreamRes.on('error', (e) => {
-        clearInterval(heartbeatTimer);
-        // Don't log full error (might contain sensitive info), just categorize
-        const isAbort = e.message && /aborted|reset|closed/i.test(e.message);
-        if (!isAbort) {
-          console.error('Upstream stream error:', e.code);
-        }
-
-        // Send proper SSE error event if possible
-        if (!clientRes.writableEnded) {
-          try {
-            const errPayload = anthropicError(
-              isAbort ? '上游连接中断' : ('流式响应错误: ' + e.code),
-              'upstream_stream_error'
-            );
-            clientRes.write('event: error\ndata: ' + JSON.stringify(errPayload) + '\n\n');
-            clientRes.end();
-          } catch (_) {
-            try { clientRes.end(); } catch (_) {}
-          }
-        }
-      });
-
-      // Handle client disconnect (upstreamReq cleanup)
-      clientRes.on('close', () => {
-        clearInterval(heartbeatTimer);
-        if (upstreamReq && !upstreamReq.destroyed) {
+        });
+        clientRes.on('close', () => { clearInterval(heartbeatTimer); if (upstreamReq && !upstreamReq.destroyed) upstreamReq.destroy(); });
+      } else {
+        upstreamRes.setTimeout(reqTimeoutMs, () => {
           upstreamReq.destroy();
-        }
-      });
-
-    } else {
-      // Non-streaming: pipe through with timeout
-      upstreamRes.setTimeout(UPSTREAM_TIMEOUT_MS, () => {
-        upstreamReq.destroy();
-        if (!clientRes.headersSent) {
-          clientRes.writeHead(504, { 'Content-Type': 'application/json' });
-          clientRes.end(JSON.stringify(anthropicError('上游响应超时', 'upstream_timeout')));
-        }
-      });
-
-      upstreamRes.pipe(clientRes, { end: true });
-    }
-
-    // Mid-stream upstream failure: emit a proper SSE error event so the client
-    // sees a clean termination instead of a silently truncated stream.
-    upstreamRes.on('error', (e) => {
-      // Already handled above for streaming, but add for non-streaming
-      if (!isStream) {
-        try {
+          logResult(504, 'upstream_timeout');
           if (!clientRes.headersSent) {
-            clientRes.writeHead(502, { 'Content-Type': 'application/json' });
-            clientRes.end(JSON.stringify(anthropicError('上游响应错误', 'upstream_error')));
-          } else {
-            clientRes.end();
+            clientRes.writeHead(504, { 'Content-Type': 'application/json' });
+            clientRes.end(JSON.stringify(anthropicError('上游响应超时', 'upstream_timeout')));
           }
-        } catch (_) {}
+        });
+        upstreamRes.on('end', () => { if (debugStream) console.error('[gw] non-stream end', { routeKey, status }); logResult(status, ''); });
+        upstreamRes.pipe(clientRes, { end: true });
+        upstreamRes.on('error', (e) => {
+          try {
+            if (!clientRes.headersSent) {
+              clientRes.writeHead(502, { 'Content-Type': 'application/json' });
+              clientRes.end(JSON.stringify(anthropicError('上游响应错误', 'upstream_error')));
+            } else { clientRes.end(); }
+          } catch (_) {}
+        });
       }
     });
-  });
 
-  // Client hung up: abort the upstream request so we don't waste relay quota.
-  clientRes.on('close', () => { if (upstreamReq && !upstreamReq.destroyed) upstreamReq.destroy(); });
+    // Apply idle read timeout if configured
+    if (readTimeoutMs > 0) {
+      upstreamReq.setTimeout(readTimeoutMs);
+    }
 
-  upstreamReq.on('error', (e) => {
-    try {
-      if (!clientRes.headersSent) {
-        const errType = classifyConnectionError(e);
-        clientRes.writeHead(502, { 'Content-Type': 'application/json' });
-        clientRes.end(JSON.stringify(anthropicError('网关无法连接上游: ' + errType, errType)));
-      } else { clientRes.end(); }
-    } catch (_) {}
-  });
+    clientRes.on('close', () => { if (upstreamReq && !upstreamReq.destroyed) upstreamReq.destroy(); });
 
-  // Handle request timeout
-  upstreamReq.on('timeout', () => {
-    upstreamReq.destroy();
-    try {
-      if (!clientRes.headersSent) {
-        clientRes.writeHead(504, { 'Content-Type': 'application/json' });
-        clientRes.end(JSON.stringify(anthropicError('请求超时', 'request_timeout')));
-      } else { clientRes.end(); }
-    } catch (_) {}
-  });
+    upstreamReq.on('error', (e) => {
+      const errType = classifyConnectionError(e);
+      if (maybeRetry('conn_error')) return; // retry before giving up
+      logResult(0, 'conn_error: ' + (e.code || e.message));
+      try {
+        if (!clientRes.headersSent) {
+          clientRes.writeHead(502, { 'Content-Type': 'application/json' });
+          clientRes.end(JSON.stringify(anthropicError('网关无法连接上游: ' + errType, 'upstream_unreachable')));
+        } else { clientRes.end(); }
+      } catch (_) {}
+    });
 
-  upstreamReq.write(body);
-  upstreamReq.end();
+    upstreamReq.on('timeout', () => {
+      upstreamReq.destroy();
+      if (maybeRetry('timeout')) return;
+      logResult(504, 'request_timeout');
+      try {
+        if (!clientRes.headersSent) {
+          clientRes.writeHead(504, { 'Content-Type': 'application/json' });
+          clientRes.end(JSON.stringify(anthropicError('请求超时', 'request_timeout')));
+        } else { clientRes.end(); }
+      } catch (_) {}
+    });
+
+    upstreamReq.write(body);
+    upstreamReq.end();
+  }
 }
 
 // Classify upstream HTTP errors for better error messages
@@ -1294,7 +1405,10 @@ function startGatewayServer() {
             parsed.model = routes[parsed.model]; // Anthropic name -> backend model
           }
           mappedModel = parsed.model || '';
-          applyGatewayCompat(parsed, currentCfg, originalModel); // thinking auto-fill / strip + param adapt
+          const compat = applyGatewayCompat(parsed, currentCfg, originalModel); // thinking auto-fill / strip + param adapt
+          if (process.env.RELAY_MANAGER_DEBUG_GATEWAY === '1' && compat && compat.reason !== 'injected' && compat.reason !== 'preserved') {
+            console.error('[gw] compat skipped', { routeKey: originalModel, reason: compat.reason, mode: currentCfg.thinkingMode, hasMessages: Array.isArray(parsed.messages) });
+          }
           outBody = JSON.stringify(parsed);
         } catch (e) { /* non-JSON, forward as-is */ }
         // Privacy-respecting log: only model names + path, never body/key.
@@ -1650,7 +1764,25 @@ const server = http.createServer(async (req, res) => {
         const r = error('Missing baseUrl or apiKey query parameter', 400);
         res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
       }
+      // Feature #7: time the probe and additionally try GET /v1/models so the UI
+      // can report "connected, detected N models" vs "connected but no model list".
+      const t0 = Date.now();
       const result = await testMessageAPI(baseUrl, apiKey, model, { authScheme, maxTokens });
+      result.duration_ms = Date.now() - t0;
+      // Probe models regardless of message result — gives a richer summary.
+      try {
+        const modelsRes = await fetchModelsFromAPI(baseUrl, apiKey);
+        if (modelsRes && modelsRes.success && Array.isArray(modelsRes.models)) {
+          result.modelsDetected = modelsRes.models.length;
+          result.modelsList = modelsRes.models.slice(0, 50).map(m => m.id);
+        } else {
+          result.modelsDetected = 0;
+          result.modelsError = (modelsRes && modelsRes.error) || '未获取到模型列表';
+        }
+      } catch (e) {
+        result.modelsDetected = 0;
+        result.modelsError = e.message;
+      }
       const r = json(result);
       res.writeHead(r.code, { 'Content-Type': r.type });
       res.end(r.body);
@@ -1741,6 +1873,18 @@ const server = http.createServer(async (req, res) => {
       if (data.thinkingMode !== undefined) cfg.thinkingMode = data.thinkingMode;
       if (data.thinkingBudget !== undefined) cfg.thinkingBudget = parseInt(data.thinkingBudget) || 10000;
       if (data.logging !== undefined) cfg.logging = !!data.logging;
+      // Advanced network settings (feature #3). Persisted under cfg.network; the
+      // gateway reads config fresh per-request, so these hot-reload immediately.
+      if (data.network !== undefined && data.network && typeof data.network === 'object') {
+        const n = data.network;
+        cfg.network = {
+          requestTimeoutSec: numOr(n.requestTimeoutSec, 0),
+          readTimeoutSec: numOr(n.readTimeoutSec, 0),
+          maxRetries: numOr(n.maxRetries, 0),
+          retryBackoffMs: numOr(n.retryBackoffMs, 500),
+          customHeaders: (n.customHeaders && typeof n.customHeaders === 'object') ? n.customHeaders : {},
+        };
+      }
       if (data.routes !== undefined) {
         // routes come as array of {anthropic, backend} from frontend
         const routes = {};
@@ -1830,6 +1974,74 @@ const server = http.createServer(async (req, res) => {
       });
       res.end(JSON.stringify(payload, null, 2));
       return;
+    }
+
+    // ===== Feature #2: GET /api/gateway/models — sync model list from upstream =====
+    // Uses the gateway's configured upstream Base URL + key (or query overrides) to
+    // fetch /v1/models, returning the list of model IDs.
+    if (method === 'GET' && url.pathname === '/api/gateway/models') {
+      const gw = readGatewayConfig();
+      const baseUrl = url.searchParams.get('baseUrl') || gw.upstreamBaseUrl;
+      const apiKey = url.searchParams.get('apiKey') || gw.upstreamApiKey;
+      if (!baseUrl) { const r = error('网关上游 Base URL 未配置', 400); res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return; }
+      const result = await fetchModelsFromAPI(baseUrl, apiKey);
+      const r = json(result);
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+
+    // ===== Feature #4: debug logs =====
+    // GET /api/logs — return the in-memory ring buffer (already redacted)
+    if (method === 'GET' && url.pathname === '/api/logs') {
+      const r = json({ logs: debugLog.getLogs(), max: debugLog.MAX_LOGS });
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+    // DELETE /api/logs — clear the buffer
+    if (method === 'DELETE' && url.pathname === '/api/logs') {
+      debugLog.clearLogs();
+      const r = json({ success: true });
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+
+    // ===== Feature #5: config history & rollback =====
+    // GET /api/config/history?product=claude-code|claude-desktop|codex-cli|codex-desktop
+    if (method === 'GET' && url.pathname === '/api/config/history') {
+      const product = url.searchParams.get('product') || '';
+      const result = listConfigHistory(product);
+      const r = json(result);
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+    // POST /api/config/rollback — { product, filename }
+    if (method === 'POST' && url.pathname === '/api/config/rollback') {
+      const data = JSON.parse(body || '{}');
+      try {
+        const result = await rollbackConfig(data.product, data.filename);
+        const r = json({ success: true, ...result });
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+      } catch (e) {
+        const r = error(e.message, 400);
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+      }
+    }
+
+    // ===== Feature #6: process status & restart =====
+    // GET /api/process/status?product=claude-desktop|codex-desktop|proxy
+    if (method === 'GET' && url.pathname === '/api/process/status') {
+      const product = url.searchParams.get('product') || 'claude-desktop';
+      const r = json(getProcessStatus(product));
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+    // POST /api/process/restart — { product } (kill -> wait 2s -> start)
+    if (method === 'POST' && url.pathname === '/api/process/restart') {
+      const data = JSON.parse(body || '{}');
+      const product = data.product || 'claude-desktop';
+      try {
+        const result = restartApp(product);
+        const r = json({ success: true, ...result });
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+      } catch (e) {
+        const r = error(e.message, 400);
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+      }
     }
 
     // 404
