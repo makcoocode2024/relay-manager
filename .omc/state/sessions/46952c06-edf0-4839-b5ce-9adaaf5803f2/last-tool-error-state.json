@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"cd C:/Users/admin/relay-manager && git add server.js && git commit -m \\\"feat: 补全 Codex CLI 预设管理的 delete/rename/export 路由\\n\\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic....",
+  "error": "Exit code 128\nfatal: Unable to create 'C:/Users/admin/relay-manager/.git/index.lock': File exists.\n\nAnother git process seems to be running in this repository, or the lock file may be stale",
+  "timestamp": "2026-06-25T09:38:33.449Z",
+  "retry_count": 1
+}

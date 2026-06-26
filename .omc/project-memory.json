@@ -1,0 +1,181 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1782375083099,
+  "projectRoot": "C:\\Users\\admin\\relay-manager",
+  "techStack": {
+    "languages": [
+      {
+        "name": "JavaScript/TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "package.json"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "npm",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": "npm test",
+    "lintCommand": null,
+    "devCommand": "npm run start",
+    "scripts": {
+      "start": "node server.js",
+      "check": "node --check server.js",
+      "test": "node test/toml.test.js && node test/gateway.test.js && node test/features.test.js"
+    }
+  },
+  "conventions": {
+    "namingStyle": "camelCase",
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "lib",
+      "test"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "backups": {
+      "path": "backups",
+      "purpose": null,
+      "fileCount": 32,
+      "lastAccessed": 1782375082958,
+      "keyFiles": [
+        "cc-configs-20260625_010844.json",
+        "cc-configs-20260625_010845.json",
+        "cc-configs-20260625_010916.json",
+        "cc-configs-20260625_091316.json",
+        "cc-configs-20260625_104951.json"
+      ]
+    },
+    "lib": {
+      "path": "lib",
+      "purpose": "Library code",
+      "fileCount": 1,
+      "lastAccessed": 1782375082961,
+      "keyFiles": [
+        "debugLog.js"
+      ]
+    },
+    "test": {
+      "path": "test",
+      "purpose": "Test files",
+      "fileCount": 3,
+      "lastAccessed": 1782375082994,
+      "keyFiles": [
+        "features.test.js",
+        "gateway.test.js",
+        "toml.test.js"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "index.html",
+      "accessCount": 120,
+      "lastAccessed": 1782405249005,
+      "type": "directory"
+    },
+    {
+      "path": "server.js",
+      "accessCount": 55,
+      "lastAccessed": 1782405250089,
+      "type": "directory"
+    },
+    {
+      "path": "",
+      "accessCount": 40,
+      "lastAccessed": 1782405220627,
+      "type": "directory"
+    },
+    {
+      "path": "CLAUDE.md",
+      "accessCount": 13,
+      "lastAccessed": 1782404865770,
+      "type": "file"
+    },
+    {
+      "path": "test\\features.test.js",
+      "accessCount": 8,
+      "lastAccessed": 1782405228552,
+      "type": "file"
+    },
+    {
+      "path": "package.json",
+      "accessCount": 5,
+      "lastAccessed": 1782405211137,
+      "type": "file"
+    },
+    {
+      "path": ".claudeignore",
+      "accessCount": 3,
+      "lastAccessed": 1782404644575,
+      "type": "file"
+    },
+    {
+      "path": "test\\gateway.test.js",
+      "accessCount": 3,
+      "lastAccessed": 1782405225841,
+      "type": "directory"
+    },
+    {
+      "path": "docs\\superpowers\\plans\\2026-06-25-codex-cli-multi-config.md",
+      "accessCount": 2,
+      "lastAccessed": 1782395373117,
+      "type": "file"
+    },
+    {
+      "path": "index.html.bak-20260625-073703",
+      "accessCount": 2,
+      "lastAccessed": 1782400193201,
+      "type": "directory"
+    },
+    {
+      "path": "AGENTS.md",
+      "accessCount": 2,
+      "lastAccessed": 1782403768382,
+      "type": "file"
+    },
+    {
+      "path": "index.html.broken-143525",
+      "accessCount": 1,
+      "lastAccessed": 1782400185898,
+      "type": "directory"
+    },
+    {
+      "path": "index.html.bak-20260625-032140",
+      "accessCount": 1,
+      "lastAccessed": 1782400186132,
+      "type": "directory"
+    },
+    {
+      "path": ".claude\\settings.json",
+      "accessCount": 1,
+      "lastAccessed": 1782403166926,
+      "type": "file"
+    },
+    {
+      "path": "test\\toml.test.js",
+      "accessCount": 1,
+      "lastAccessed": 1782405225638,
+      "type": "file"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 1,
+      "lastAccessed": 1782405228462,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

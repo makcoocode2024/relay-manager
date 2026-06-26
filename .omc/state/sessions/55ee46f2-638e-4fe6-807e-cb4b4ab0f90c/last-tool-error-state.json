@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"npm test\",\"timeout\":120000,\"description\":\"运行测试验证修复\"}",
+  "error": "Exit code 1\n\n> relay-manager@1.0.0 test\n> node test/toml.test.js && node test/gateway.test.js && node test/features.test.js\n\nPASS: base_url updated\nPASS: bearer token added\nPASS: boolean requires_openai_auth\nPASS: provider name updated\nPASS: top-level model updated\nPASS: untouched model_provider preserved\nPASS: untouched reasoning_effort preserved\nPASS: untouched wire_api preserved\nPASS: malformed TOML throws (write would be refused)\n\n=== 9 passed, 0 failed ===\n[srv] 端口 9876 已被占用 —— RelayManager...",
+  "timestamp": "2026-06-25T15:26:57.685Z",
+  "retry_count": 1
+}

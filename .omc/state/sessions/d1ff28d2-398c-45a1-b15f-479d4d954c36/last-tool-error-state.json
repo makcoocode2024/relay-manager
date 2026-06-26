@@ -1,0 +1,7 @@
+{
+  "tool_name": "WebFetch",
+  "tool_input_preview": "{\"url\":\"https://www.npmjs.com/package/@spear-secure/hook\",\"prompt\":\"读取这个 npm 包页面，提取安装方式、配置步骤、是否需要写入 Claude/OMC settings、以及任何需要注意的前置条件。只返回与安装相关的关键信息。\"}",
+  "error": "Unable to verify if domain www.npmjs.com is safe to fetch. This may be due to network restrictions or enterprise security policies blocking claude.ai.",
+  "timestamp": "2026-06-25T13:21:20.051Z",
+  "retry_count": 1
+}

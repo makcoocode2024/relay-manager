@@ -1,0 +1,79 @@
+{
+  "updatedAt": "2026-06-25T15:58:40.964Z",
+  "missions": [
+    {
+      "id": "session:7b52551c-73ac-457a-927e-693623036ecd:none",
+      "source": "session",
+      "name": "none",
+      "objective": "Session mission",
+      "createdAt": "2026-06-25T15:56:39.517Z",
+      "updatedAt": "2026-06-25T15:58:40.964Z",
+      "status": "done",
+      "workerCount": 2,
+      "taskCounts": {
+        "total": 2,
+        "pending": 0,
+        "blocked": 0,
+        "inProgress": 0,
+        "completed": 2,
+        "failed": 0
+      },
+      "agents": [
+        {
+          "name": "claude-code-guide:a6bccff",
+          "role": "claude-code-guide",
+          "ownership": "a6bccffaa4a8de221",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-06-25T15:57:05.252Z"
+        },
+        {
+          "name": "claude-code-guide:ac652b2",
+          "role": "claude-code-guide",
+          "ownership": "ac652b25db45581cc",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-06-25T15:58:40.964Z"
+        }
+      ],
+      "timeline": [
+        {
+          "id": "session-start:a6bccffaa4a8de221:2026-06-25T15:56:39.517Z",
+          "at": "2026-06-25T15:56:39.517Z",
+          "kind": "update",
+          "agent": "claude-code-guide:a6bccff",
+          "detail": "started claude-code-guide:a6bccff",
+          "sourceKey": "session-start:a6bccffaa4a8de221"
+        },
+        {
+          "id": "session-stop:a6bccffaa4a8de221:2026-06-25T15:57:05.252Z",
+          "at": "2026-06-25T15:57:05.252Z",
+          "kind": "completion",
+          "agent": "claude-code-guide:a6bccff",
+          "detail": "completed",
+          "sourceKey": "session-stop:a6bccffaa4a8de221"
+        },
+        {
+          "id": "session-start:ac652b25db45581cc:2026-06-25T15:58:28.280Z",
+          "at": "2026-06-25T15:58:28.280Z",
+          "kind": "update",
+          "agent": "claude-code-guide:ac652b2",
+          "detail": "started claude-code-guide:ac652b2",
+          "sourceKey": "session-start:ac652b25db45581cc"
+        },
+        {
+          "id": "session-stop:ac652b25db45581cc:2026-06-25T15:58:40.964Z",
+          "at": "2026-06-25T15:58:40.964Z",
+          "kind": "completion",
+          "agent": "claude-code-guide:ac652b2",
+          "detail": "completed",
+          "sourceKey": "session-stop:ac652b25db45581cc"
+        }
+      ]
+    }
+  ]
+}

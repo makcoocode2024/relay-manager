@@ -1,0 +1,26 @@
+{
+  "agents": [
+    {
+      "agent_id": "a6bccffaa4a8de221",
+      "agent_type": "claude-code-guide",
+      "started_at": "2026-06-25T15:56:39.517Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-06-25T15:57:05.252Z",
+      "duration_ms": 25735
+    },
+    {
+      "agent_id": "ac652b25db45581cc",
+      "agent_type": "claude-code-guide",
+      "started_at": "2026-06-25T15:58:28.280Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-06-25T15:58:40.964Z",
+      "duration_ms": 12684
+    }
+  ],
+  "total_spawned": 2,
+  "total_completed": 2,
+  "total_failed": 0,
+  "last_updated": "2026-06-25T15:58:41.079Z"
+}

@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"python - <<'PY'\\nimport urllib.request\\nprint(urllib.request.urlopen('http://127.0.0.1:9876/', timeout=5).status)\\nPY\",\"timeout\":600000,\"description\":\"Verify server responds on localhost\"}",
+  "error": "Exit code 127\n/usr/bin/bash: line 1: python: command not found",
+  "timestamp": "2026-06-25T16:32:15.884Z",
+  "retry_count": 1
+}

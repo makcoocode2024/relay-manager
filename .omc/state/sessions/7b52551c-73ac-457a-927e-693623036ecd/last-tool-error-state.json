@@ -1,0 +1,7 @@
+{
+  "tool_name": "Read",
+  "tool_input_preview": "{\"file_path\":\"C:\\\\Users\\\\admin\\\\relay-manager\\\\.claudeignore\"}",
+  "error": "File does not exist. Note: your current working directory is C:\\Users\\admin\\relay-manager.",
+  "timestamp": "2026-06-25T16:01:24.092Z",
+  "retry_count": 1
+}
