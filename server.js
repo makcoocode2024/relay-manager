@@ -33,6 +33,7 @@ const PATHS = (() => {
   const claudeCode = path.join(HOME, '.claude', 'settings.json');
   const proxyEnv = path.join(HOME, '.codex', '.env');
   const codexCliStore = path.join(__dirname, 'codex-cli-configs.json');
+  const codexDesktopStore = path.join(__dirname, 'codex-desktop-configs.json');
 
   if (IS_WIN) {
     return {
@@ -43,6 +44,7 @@ const PATHS = (() => {
       codexCliStore,
       codexDesktopConfig: path.join(HOME, 'AppData', 'Roaming', 'ccx-desktop', '.config', 'config.json'),
       codexDesktopInjection: path.join(HOME, 'AppData', 'Roaming', 'ccx-desktop', 'agent-config-state', 'codex.json'),
+      codexDesktopStore,
       proxyEnv,
       clashVergeDir: 'C:\\Program Files\\Clash Verge',
     };
@@ -56,6 +58,7 @@ const PATHS = (() => {
     codexCliStore,
     codexDesktopConfig: macAppSupport('ccx-desktop', '.config', 'config.json'),
     codexDesktopInjection: macAppSupport('ccx-desktop', 'agent-config-state', 'codex.json'),
+    codexDesktopStore,
     proxyEnv,
     clashVergeDir: '/Applications/Clash Verge.app',
   };
@@ -661,6 +664,7 @@ function exportCDConfig(id, stripKey) {
 // 该文件含密钥，已在 .gitignore 中忽略，禁止提交。
 const CC_CONFIGS_PATH = path.join(__dirname, 'cc-configs.json');
 const CODEX_CONFIGS_PATH = PATHS.codexCliStore;
+const CXD_CONFIGS_PATH = PATHS.codexDesktopStore;
 
 function readCCStore() {
   const obj = readJSON(CC_CONFIGS_PATH);
@@ -873,6 +877,100 @@ function exportCodexConfig(id, stripKey) {
   const e = store.entries.find(x => x.id === id);
   const config = e ? Object.assign({}, e.config) : {};
   if (stripKey) config.apiKey = '';
+  return { name: e ? e.name : '导出配置', config };
+}
+
+// ========== CODEX DESKTOP — 多套配置（预设）管理 ==========
+// Codex Desktop 原生没有多配置库，由 RelayManager 自维护预设清单
+// codex-desktop-configs.json：{ appliedId, entries:[{id,name,config:{injectedBaseUrl,injectedApiKey,...}}] }
+// 该文件含密钥，已 gitignore，禁止提交。CXD_CONFIGS_PATH 已在上方定义。
+
+function readCXDStore() {
+  const obj = readJSON(CXD_CONFIGS_PATH);
+  if (!obj || !Array.isArray(obj.entries)) return { appliedId: '', entries: [] };
+  return { appliedId: obj.appliedId || '', entries: obj.entries };
+}
+async function writeCXDStore(store) {
+  await backupFile(CXD_CONFIGS_PATH);
+  await atomicWrite(CXD_CONFIGS_PATH, JSON.stringify(store, null, 2) + '\n');
+}
+
+function sanitizeCXDConfig(d) {
+  d = d || {};
+  const str = v => (v === undefined || v === null) ? '' : String(v);
+  return {
+    injectedBaseUrl: str(d.injectedBaseUrl),
+    injectedApiKey: str(d.injectedApiKey),
+    responsesUpstream: Array.isArray(d.responsesUpstream) ? d.responsesUpstream : [],
+    chatUpstream: Array.isArray(d.chatUpstream) ? d.chatUpstream : [],
+    circuitBreaker: (d.circuitBreaker && typeof d.circuitBreaker === 'object') ? d.circuitBreaker : {},
+    fuzzyModeEnabled: d.fuzzyModeEnabled !== false,
+  };
+}
+
+function listCXDConfigs() {
+  const store = readCXDStore();
+  const configs = store.entries.map(e => ({
+    id: e.id,
+    name: e.name || '(未命名)',
+    injectedBaseUrl: (e.config && e.config.injectedBaseUrl) || '',
+    applied: e.id === store.appliedId,
+  }));
+  return { appliedId: store.appliedId || '', configs };
+}
+
+async function createCXDConfig(name, configData) {
+  const store = readCXDStore();
+  const id = require('crypto').randomUUID();
+  store.entries.push({ id, name: name || '新配置', config: sanitizeCXDConfig(configData) });
+  if (!store.appliedId) store.appliedId = id;
+  await writeCXDStore(store);
+  return id;
+}
+
+async function applyCXDConfig(id) {
+  const store = readCXDStore();
+  const e = store.entries.find(x => x.id === id);
+  if (!e) throw new Error('配置不存在: ' + id);
+  store.appliedId = id;
+  await writeCXDStore(store);
+  await writeCodexDesktop(e.config || {});
+  return id;
+}
+
+async function updateCXDConfig(id, configData) {
+  const store = readCXDStore();
+  const e = store.entries.find(x => x.id === id);
+  if (!e) throw new Error('配置不存在: ' + id);
+  e.config = sanitizeCXDConfig(configData);
+  await writeCXDStore(store);
+  if (store.appliedId === id) {
+    await writeCodexDesktop(e.config || {});
+  }
+  return id;
+}
+
+async function deleteCXDConfig(id) {
+  const store = readCXDStore();
+  store.entries = store.entries.filter(e => e.id !== id);
+  if (store.appliedId === id) store.appliedId = '';
+  await writeCXDStore(store);
+  return store.appliedId;
+}
+
+async function renameCXDConfig(id, name) {
+  const store = readCXDStore();
+  const e = store.entries.find(x => x.id === id);
+  if (!e) throw new Error('配置不存在');
+  e.name = (name || '').trim() || e.name;
+  await writeCXDStore(store);
+}
+
+function exportCXDConfig(id, stripKey) {
+  const store = readCXDStore();
+  const e = store.entries.find(x => x.id === id);
+  const config = e ? Object.assign({}, e.config) : {};
+  if (stripKey) config.injectedApiKey = '';
   return { name: e ? e.name : '导出配置', config };
 }
 
@@ -2499,6 +2597,88 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify(payload, null, 2));
       return;
     }
+    // POST /api/codex-cli/config/import — 导入 JSON 预设 { name, config }
+    if (method === 'POST' && url.pathname === '/api/codex-cli/config/import') {
+      const data = JSON.parse(body || '{}');
+      try {
+        // 导入只创建预设，不覆写 config.toml（保守策略，与 Claude Code 版差异）
+        const id = await createCodexConfig(data.name, data.config);
+        const r = json({ success: true, id, configs: listCodexConfigs() });
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+      } catch (e) {
+        const r = error(e.message, 400);
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+      }
+    }
+    // ===== CODEX DESKTOP 预设配置路由 =====
+    // GET /api/codex-desktop/config/list — 列出全部预设及当前应用项
+    if (method === 'GET' && url.pathname === '/api/codex-desktop/config/list') {
+      const r = json(listCXDConfigs());
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+    // POST /api/codex-desktop/config/create — 新建预设 { name, config }
+    if (method === 'POST' && url.pathname === '/api/codex-desktop/config/create') {
+      const data = JSON.parse(body || '{}');
+      const id = await createCXDConfig(data.name, data.config);
+      const r = json({ success: true, id, configs: listCXDConfigs() });
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+    // POST /api/codex-desktop/config/apply — 应用预设 { id }（写入 config.json + codex.json）
+    if (method === 'POST' && url.pathname === '/api/codex-desktop/config/apply') {
+      const data = JSON.parse(body || '{}');
+      await applyCXDConfig(data.id);
+      const r = json({ success: true, configs: listCXDConfigs() });
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+    // POST /api/codex-desktop/config/update — 更新预设 { id, config }
+    if (method === 'POST' && url.pathname === '/api/codex-desktop/config/update') {
+      const data = JSON.parse(body || '{}');
+      await updateCXDConfig(data.id, data.config);
+      const r = json({ success: true, configs: listCXDConfigs() });
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+    // POST /api/codex-desktop/config/delete — 删除预设 { id }
+    if (method === 'POST' && url.pathname === '/api/codex-desktop/config/delete') {
+      const data = JSON.parse(body || '{}');
+      const appliedId = await deleteCXDConfig(data.id);
+      const r = json({ success: true, appliedId, configs: listCXDConfigs() });
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+    // POST /api/codex-desktop/config/rename — 重命名预设 { id, name }
+    if (method === 'POST' && url.pathname === '/api/codex-desktop/config/rename') {
+      const data = JSON.parse(body || '{}');
+      await renameCXDConfig(data.id, data.name);
+      const r = json({ success: true, configs: listCXDConfigs() });
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+    // GET /api/codex-desktop/config/export?id=...&stripKey=1 — 下载可移植 JSON
+    if (method === 'GET' && url.pathname === '/api/codex-desktop/config/export') {
+      const id = url.searchParams.get('id');
+      if (!id) { const r = error('Missing id', 400); res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return; }
+      const stripKey = url.searchParams.get('stripKey') === '1';
+      const payload = exportCXDConfig(id, stripKey);
+      const suffix = stripKey ? '-nokey' : '';
+      const fname = 'codex-desktop-' + (payload.name || 'config').replace(/[^\w.-]+/g, '_') + suffix + '.json';
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Disposition': 'attachment; filename="' + fname + '"',
+      });
+      res.end(JSON.stringify(payload, null, 2));
+      return;
+    }
+    // POST /api/codex-desktop/config/import — 导入 JSON 预设 { name, config }
+    if (method === 'POST' && url.pathname === '/api/codex-desktop/config/import') {
+      const data = JSON.parse(body || '{}');
+      try {
+        const id = await createCXDConfig(data.name, data.config);
+        const r = json({ success: true, id, configs: listCXDConfigs() });
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+      } catch (e) {
+        const r = error(e.message, 400);
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+      }
+    }
+
     // ===== Feature #2: GET /api/gateway/models — sync model list from upstream =====
     // Uses the gateway's configured upstream Base URL + key (or query overrides) to
     // fetch /v1/models, returning the list of model IDs.

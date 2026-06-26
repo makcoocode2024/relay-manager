@@ -5,6 +5,8 @@ node_modules/
 gateway.json
 paths.json
 cc-configs.json
+codex-cli-configs.json
+codex-desktop-configs.json
 
 # 备份文件（时间戳备份，切勿提交）
 *.bak_*

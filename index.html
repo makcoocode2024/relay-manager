@@ -543,6 +543,20 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
   <div class="card">
     <h2>Codex CLI 配置</h2>
     <p style="font-size:12px;color:var(--text2);margin-bottom:16px;">修改 <code style="background:var(--bg3);padding:1px 4px;border-radius:3px;">~\.codex\config.toml</code></p>
+    <!-- 多套配置管理（对称 Claude Code，保守策略：新建/导入不自动 apply） -->
+    <div style="background:var(--bg3);border-radius:8px;padding:10px 12px;margin-bottom:16px;">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <label style="font-size:12px;color:var(--text2);white-space:nowrap;">当前配置</label>
+        <select id="cx-config-select" onchange="switchCXConfig()" style="flex:1;min-width:160px;"></select>
+        <button class="btn btn-outline btn-sm" onclick="newCXConfig()">+ 新建</button>
+        <button class="btn btn-outline btn-sm" onclick="renameCXConfigUI()">&#x270e; 重命名</button>
+        <button class="btn btn-red btn-sm" onclick="deleteCXConfigUI()">&#x2715; 删除</button>
+        <button class="btn btn-outline btn-sm" onclick="exportCXConfigUI()">&#x2b07; 导出</button>
+        <button class="btn btn-outline btn-sm" onclick="document.getElementById('cx-import-file').click()">&#x2b06; 导入</button>
+        <input type="file" id="cx-import-file" accept="application/json,.json" style="display:none" onchange="importCXConfigUI(event)">
+      </div>
+      <p style="font-size:11px;color:var(--text2);margin:6px 0 0;">下拉切换=把所选预设写入 <code>~\.codex\config.toml</code>；新建/导入只创建预设，不主动覆盖当前生效配置。下方表单编辑的始终是「当前预设」内容。</p>
+    </div>
     <div class="form-row">
       <div class="form-group">
         <label>Base URL</label>
@@ -646,7 +660,21 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
 <section class="tab-panel" id="panel-codex-desktop">
   <div class="card">
     <h2>Codex Desktop 注入配置</h2>
-    <p style="font-size:12px;color:var(--text2);margin-bottom:16px;">修改 <code style="background:var(--bg3);padding:1px 4px;border-radius:3px;">agent-config-state\codex.json</code></p>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:16px;">修改 <code style="background:var(--bg3);padding:1px 4px;border-radius:3px;">agent-config-state\codex.json</code> + <code style="background:var(--bg3);padding:1px 4px;border-radius:3px;">.config\config.json</code></p>
+    <!-- 多套配置管理（对称 Claude Code） -->
+    <div style="background:var(--bg3);border-radius:8px;padding:10px 12px;margin-bottom:16px;">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <label style="font-size:12px;color:var(--text2);white-space:nowrap;">当前配置</label>
+        <select id="cxd-config-select" onchange="switchCXDConfig()" style="flex:1;min-width:160px;"></select>
+        <button class="btn btn-outline btn-sm" onclick="newCXDConfig()">+ 新建</button>
+        <button class="btn btn-outline btn-sm" onclick="renameCXDConfigUI()">&#x270e; 重命名</button>
+        <button class="btn btn-red btn-sm" onclick="deleteCXDConfigUI()">&#x2715; 删除</button>
+        <button class="btn btn-outline btn-sm" onclick="exportCXDConfigUI()">&#x2b07; 导出</button>
+        <button class="btn btn-outline btn-sm" onclick="document.getElementById('cxd-import-file').click()">&#x2b06; 导入</button>
+        <input type="file" id="cxd-import-file" accept="application/json,.json" style="display:none" onchange="importCXDConfigUI(event)">
+      </div>
+      <p style="font-size:11px;color:var(--text2);margin:6px 0 0;">下拉切换=把所选预设同时写入 <code>config.json</code> + <code>codex.json</code>；下方表单编辑的始终是「当前预设」内容。改完记得重启 Codex Desktop。</p>
+    </div>
     <div class="form-row">
       <div class="form-group">
         <label>Injected Base URL</label>
@@ -994,9 +1022,11 @@ function populateAllForms() {
   setVal('cx-request-retries', cx.requestMaxRetries || '');
   setVal('cx-stream-retries', cx.streamMaxRetries || '');
   setVal('cx-stream-idle', cx.streamIdleTimeoutMs || '');
+  loadCXConfigs();
 
   // Codex Desktop
   setVal('cxd-injected-url', cxd.injectedBaseUrl); setVal('cxd-injected-key', cxd.injectedApiKey);
+  loadCXDConfigs();
 
   // Sync inputs
   const syncUrl = cc.baseUrl || cd.baseUrl || cx.baseUrl || '';
@@ -2183,6 +2213,17 @@ function collectCXConfig() {
   };
 }
 
+// 收集 Codex Desktop 表单值为对象（注入+上游），供创建预设时使用
+function collectCXDConfig() {
+  return {
+    injectedBaseUrl: getVal('cxd-injected-url'), injectedApiKey: getVal('cxd-injected-key'),
+    responsesUpstream: Array.isArray(currentState.codexDesktop?.responsesUpstream) ? currentState.codexDesktop.responsesUpstream : [],
+    chatUpstream: Array.isArray(currentState.codexDesktop?.chatUpstream) ? currentState.codexDesktop.chatUpstream : [],
+    circuitBreaker: (currentState.codexDesktop && currentState.codexDesktop.circuitBreaker) || {},
+    fuzzyModeEnabled: currentState.codexDesktop ? currentState.codexDesktop.fuzzyModeEnabled : true,
+  };
+}
+
 async function loadCCConfigs() {
   try {
     const data = await api('/api/claude-code/configs', 'GET');
@@ -2267,6 +2308,182 @@ async function importCCConfigUI(event) {
     const res = await api('/api/claude-code/config/import', 'POST', { name, config });
     await api('/api/claude-code/config/apply', 'POST', { id: res.id });
     toast('已导入并切换到「' + name + '」');
+    await loadState();
+  } catch (e) { toast('导入失败：' + e.message + '（请确认是有效的配置 JSON）', 'error'); }
+}
+
+// ===== CODEX CLI 多配置管理 =====
+let cxConfigList = [];
+
+async function loadCXConfigs() {
+  try {
+    const data = await api('/api/codex-cli/config/list', 'GET');
+    cxConfigList = data.configs || [];
+    const sel = document.getElementById('cx-config-select');
+    if (!sel) return;
+    if (cxConfigList.length === 0) {
+      sel.innerHTML = '<option value="">（无预设，点「新建」把当前表单存为一套）</option>';
+      return;
+    }
+    sel.innerHTML = cxConfigList.map(c =>
+      `<option value="${esc(c.id)}" ${c.applied ? 'selected' : ''}>${esc(c.name)}${c.applied ? '（生效中）' : ''} — ${esc(c.baseUrl || '未设地址')}</option>`
+    ).join('');
+  } catch (e) { /* 读取失败时静默 */ }
+}
+
+async function switchCXConfig() {
+  const id = getVal('cx-config-select');
+  if (!id) return;
+  try {
+    await api('/api/codex-cli/config/apply', 'POST', { id });
+    toast('已切换并写入 config.toml，新开的 Codex CLI 会话即生效；下方表单会随之加载对应配置');
+    await loadState();
+  } catch (e) { toast('切换失败：' + e.message, 'error'); }
+}
+
+// 保守策略：新建只创建预设，不覆写 config.toml（与 Claude Code 版差异）
+async function newCXConfig() {
+  const name = prompt('新配置名称：', '新中转配置');
+  if (name === null) return;
+  try {
+    (await api('/api/codex-cli/config/create', 'POST', { name, config: collectCXConfig() }));
+    toast('已创建预设「' + name + '」（未覆盖当前生效的 config.toml，需下拉切换才会写入）');
+    await loadCXConfigs();
+  } catch (e) { toast('创建失败：' + e.message, 'error'); }
+}
+
+async function renameCXConfigUI() {
+  const id = getVal('cx-config-select');
+  if (!id) { toast('请先选择一个配置', 'error'); return; }
+  const cur = cxConfigList.find(c => c.id === id);
+  const name = prompt('重命名配置：', cur ? cur.name : '');
+  if (name === null || !name.trim()) return;
+  try {
+    await api('/api/codex-cli/config/rename', 'POST', { id, name: name.trim() });
+    toast('已重命名'); await loadCXConfigs();
+  } catch (e) { toast('重命名失败：' + e.message, 'error'); }
+}
+
+async function deleteCXConfigUI() {
+  const id = getVal('cx-config-select');
+  if (!id) { toast('请先选择一个配置', 'error'); return; }
+  const cur = cxConfigList.find(c => c.id === id);
+  if (!confirm('确定删除配置「' + (cur ? cur.name : id) + '」？\n（仅从预设清单移除，不改动当前 config.toml）')) return;
+  try {
+    await api('/api/codex-cli/config/delete', 'POST', { id });
+    toast('已删除'); await loadCXConfigs();
+  } catch (e) { toast('删除失败：' + e.message, 'error'); }
+}
+
+function exportCXConfigUI() {
+  const id = getVal('cx-config-select');
+  if (!id) { toast('请先选择一个配置', 'error'); return; }
+  const choice = confirm('导出是否包含 API Key？\n\n点「确定」= 含密钥（完整备份，请勿外传）\n点「取消」= 不含密钥（可安全分享）');
+  const stripKey = choice ? '' : '&stripKey=1';
+  window.location.href = '/api/codex-cli/config/export?id=' + encodeURIComponent(id) + stripKey;
+  toast(choice ? '正在导出（含密钥）' : '正在导出（已去除密钥）');
+}
+
+// 保守策略：导入只创建预设，不覆写 config.toml（与 Claude Code 版差异）
+async function importCXConfigUI(event) {
+  const file = event.target.files && event.target.files[0];
+  event.target.value = '';
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const parsed = JSON.parse(text);
+    const config = parsed.config || parsed;
+    const name = parsed.name || file.name.replace(/\.json$/i, '') || '导入配置';
+    await api('/api/codex-cli/config/import', 'POST', { name, config });
+    toast('已导入预设「' + name + '」（未覆盖当前生效的 config.toml，需下拉切换才会写入）');
+    await loadCXConfigs();
+  } catch (e) { toast('导入失败：' + e.message + '（请确认是有效的配置 JSON）', 'error'); }
+}
+
+// ===== CODEX DESKTOP 多配置管理 =====
+let cxdConfigList = [];
+
+async function loadCXDConfigs() {
+  try {
+    const data = await api('/api/codex-desktop/config/list', 'GET');
+    cxdConfigList = data.configs || [];
+    const sel = document.getElementById('cxd-config-select');
+    if (!sel) return;
+    if (cxdConfigList.length === 0) {
+      sel.innerHTML = '<option value="">（无预设，点「新建」把当前表单存为一套）</option>';
+      return;
+    }
+    sel.innerHTML = cxdConfigList.map(c =>
+      `<option value="${esc(c.id)}" ${c.applied ? 'selected' : ''}>${esc(c.name)}${c.applied ? '（生效中）' : ''} — ${esc(c.injectedBaseUrl || '未设地址')}</option>`
+    ).join('');
+  } catch (e) { /* 读取失败时静默 */ }
+}
+
+async function switchCXDConfig() {
+  const id = getVal('cxd-config-select');
+  if (!id) return;
+  try {
+    await api('/api/codex-desktop/config/apply', 'POST', { id });
+    toast('已切换并写入 config.json + codex.json，重启 Codex Desktop 后生效');
+    await loadState();
+  } catch (e) { toast('切换失败：' + e.message, 'error'); }
+}
+
+async function newCXDConfig() {
+  const name = prompt('新配置名称：', '新中转配置');
+  if (name === null) return;
+  try {
+    await api('/api/codex-desktop/config/create', 'POST', { name, config: collectCXDConfig() });
+    toast('已创建预设「' + name + '」并写入 config.json + codex.json');
+    await loadCXDConfigs();
+  } catch (e) { toast('创建失败：' + e.message, 'error'); }
+}
+
+async function renameCXDConfigUI() {
+  const id = getVal('cxd-config-select');
+  if (!id) { toast('请先选择一个配置', 'error'); return; }
+  const cur = cxdConfigList.find(c => c.id === id);
+  const name = prompt('重命名配置：', cur ? cur.name : '');
+  if (name === null || !name.trim()) return;
+  try {
+    await api('/api/codex-desktop/config/rename', 'POST', { id, name: name.trim() });
+    toast('已重命名'); await loadCXDConfigs();
+  } catch (e) { toast('重命名失败：' + e.message, 'error'); }
+}
+
+async function deleteCXDConfigUI() {
+  const id = getVal('cxd-config-select');
+  if (!id) { toast('请先选择一个配置', 'error'); return; }
+  const cur = cxdConfigList.find(c => c.id === id);
+  if (!confirm('确定删除配置「' + (cur ? cur.name : id) + '」？\n（仅从预设清单移除，不改动当前配置文件）')) return;
+  try {
+    await api('/api/codex-desktop/config/delete', 'POST', { id });
+    toast('已删除'); await loadCXDConfigs();
+  } catch (e) { toast('删除失败：' + e.message, 'error'); }
+}
+
+function exportCXDConfigUI() {
+  const id = getVal('cxd-config-select');
+  if (!id) { toast('请先选择一个配置', 'error'); return; }
+  const choice = confirm('导出是否包含 API Key？\n\n点「确定」= 含密钥（完整备份，请勿外传）\n点「取消」= 不含密钥（可安全分享）');
+  const stripKey = choice ? '' : '&stripKey=1';
+  window.location.href = '/api/codex-desktop/config/export?id=' + encodeURIComponent(id) + stripKey;
+  toast(choice ? '正在导出（含密钥）' : '正在导出（已去除密钥）');
+}
+
+// 导入后自动应用（Codex Desktop 无保守策略，因为 config.json 结构复杂直接应用更安全）
+async function importCXDConfigUI(event) {
+  const file = event.target.files && event.target.files[0];
+  event.target.value = '';
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const parsed = JSON.parse(text);
+    const config = parsed.config || parsed;
+    const name = parsed.name || file.name.replace(/\.json$/i, '') || '导入配置';
+    const res = await api('/api/codex-desktop/config/import', 'POST', { name, config });
+    await api('/api/codex-desktop/config/apply', 'POST', { id: res.id });
+    toast('已导入并切换到「' + name + '」，已写入 config.json + codex.json');
     await loadState();
   } catch (e) { toast('导入失败：' + e.message + '（请确认是有效的配置 JSON）', 'error'); }
 }
