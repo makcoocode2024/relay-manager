@@ -8,7 +8,7 @@ const toml = require('@iarna/toml');
 const net = require('net');
 const debugLog = require('./lib/debugLog');
 
-const PORT = 9876;
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) || 9876 : 9876;
 
 // ========== PLATFORM DETECTION ==========
 // Requirement #5: cross-platform Windows / macOS. We branch on process.platform
@@ -32,6 +32,7 @@ const PATHS = (() => {
   const codexCli = path.join(HOME, '.codex', 'config.toml');
   const claudeCode = path.join(HOME, '.claude', 'settings.json');
   const proxyEnv = path.join(HOME, '.codex', '.env');
+  const codexCliStore = path.join(__dirname, 'codex-cli-configs.json');
 
   if (IS_WIN) {
     return {
@@ -39,6 +40,7 @@ const PATHS = (() => {
       claudeDesktopMeta: path.join(HOME, 'AppData', 'Local', 'Claude-3p', 'configLibrary', '_meta.json'),
       claudeDesktopDir: path.join(HOME, 'AppData', 'Local', 'Claude-3p', 'configLibrary'),
       codexCli,
+      codexCliStore,
       codexDesktopConfig: path.join(HOME, 'AppData', 'Roaming', 'ccx-desktop', '.config', 'config.json'),
       codexDesktopInjection: path.join(HOME, 'AppData', 'Roaming', 'ccx-desktop', 'agent-config-state', 'codex.json'),
       proxyEnv,
@@ -51,6 +53,7 @@ const PATHS = (() => {
     claudeDesktopMeta: macAppSupport('Claude-3p', 'configLibrary', '_meta.json'),
     claudeDesktopDir: macAppSupport('Claude-3p', 'configLibrary'),
     codexCli,
+    codexCliStore,
     codexDesktopConfig: macAppSupport('ccx-desktop', '.config', 'config.json'),
     codexDesktopInjection: macAppSupport('ccx-desktop', 'agent-config-state', 'codex.json'),
     proxyEnv,
@@ -334,19 +337,50 @@ function readClaudeDesktop() {
 }
 
 function readCodexCli() {
-  if (!fs.existsSync(PATHS.codexCli)) return { baseUrl: '', apiKey: '', model: 'gpt-5.5', modelProvider: 'custom', providerName: 'My Codex', wireApi: 'responses', requiresOpenaiAuth: true, reasoningEffort: 'high' };
+  // 默认值（文件不存在时）。新增的高级字段一并给出空/默认值，保证前端表单不会拿到 undefined。
+  if (!fs.existsSync(PATHS.codexCli)) return {
+    baseUrl: '', apiKey: '', model: 'gpt-5.5', modelProvider: 'custom', providerName: 'My Codex',
+    wireApi: 'responses', requiresOpenaiAuth: true, reasoningEffort: 'high',
+    reasoningSummary: 'auto', verbosity: '', disableResponseStorage: false,
+    httpHeaders: {}, requestMaxRetries: '', streamMaxRetries: '', streamIdleTimeoutMs: '',
+    configId: '',
+  };
   const raw = fs.readFileSync(PATHS.codexCli, 'utf-8');
   const obj = toml.parse(raw);
-  const custom = (obj.model_providers && obj.model_providers.custom) || {};
+  // 用实际的 model_provider 值作为表键，与 writeCodexCli 保持对称；默认回退 'custom'。
+  const providerKey = obj.model_provider || 'custom';
+  const custom = (obj.model_providers && obj.model_providers[providerKey]) || {};
+  // 数字字段可能不存在，统一转成字符串（空串=未设置），方便前端 input 显示。
+  const numOrEmpty = (v) => (v === undefined || v === null ? '' : String(v));
+  // 当 experimental_bearer_token 为空而 env_key 指向环境变量时，尝试从 .codex/.env 回退读取
+  let apiKey = custom.experimental_bearer_token || '';
+  if (!apiKey && custom.env_key && typeof custom.env_key === 'string') {
+    try {
+      const envRaw = fs.readFileSync(PATHS.proxyEnv, 'utf-8');
+      const prefix = custom.env_key.trim() + '=';
+      for (const line of envRaw.split('\n')) {
+        if (line.startsWith(prefix)) { apiKey = line.slice(prefix.length).trim(); break; }
+      }
+    } catch (e) { /* .env 不存在或读取失败，保持空 */ }
+  }
   return {
     baseUrl: custom.base_url || '',
-    apiKey: custom.experimental_bearer_token || '',
+    apiKey,
     model: obj.model || 'gpt-5.5',
     modelProvider: obj.model_provider || 'custom',
     providerName: custom.name || 'My Codex',
     wireApi: custom.wire_api || 'responses',
     requiresOpenaiAuth: custom.requires_openai_auth !== false,
     reasoningEffort: obj.model_reasoning_effort || 'high',
+    // ===== 高级字段 =====
+    reasoningSummary: obj.model_reasoning_summary || 'auto', // auto/concise/detailed/none
+    verbosity: obj.model_verbosity || '',                    // ''=不设置；low/medium/high（GPT-5 responses）
+    disableResponseStorage: obj.disable_response_storage === true, // 中转站不支持 responses 存储时置 true
+    httpHeaders: (custom.http_headers && typeof custom.http_headers === 'object') ? custom.http_headers : {}, // 自定义请求头
+    requestMaxRetries: numOrEmpty(custom.request_max_retries),
+    streamMaxRetries: numOrEmpty(custom.stream_max_retries),
+    streamIdleTimeoutMs: numOrEmpty(custom.stream_idle_timeout_ms),
+    configId: obj.__configId || '',
   };
 }
 
@@ -384,8 +418,27 @@ function readProxy() {
   return result;
 }
 
-// ========== WRITE FUNCTIONS ==========
+function readUiSettings() {
+  const cfg = readJSON(path.join(__dirname, 'ui-settings.json')) || {};
+  return {
+    theme: ['classic', 'dashboard', 'modern', 'light'].includes(cfg.theme) ? cfg.theme : 'classic',
+    sidebarLayout: ['classic', 'compact', 'sidebar'].includes(cfg.sidebarLayout) ? cfg.sidebarLayout : 'classic',
+  };
+}
 
+async function writeUiSettings(data) {
+  const filePath = path.join(__dirname, 'ui-settings.json');
+  const cfg = readUiSettings();
+  if (data && typeof data === 'object') {
+    if (['classic', 'dashboard', 'modern', 'light'].includes(data.theme)) cfg.theme = data.theme;
+    if (['classic', 'compact', 'sidebar'].includes(data.sidebarLayout)) cfg.sidebarLayout = data.sidebarLayout;
+  }
+  await backupFile(filePath);
+  await atomicWrite(filePath, JSON.stringify(cfg, null, 2) + '\n');
+  return cfg;
+}
+
+// ========== WRITE FUNCTIONS ==========
 async function writeClaudeCode(data) {
   const filePath = PATHS.claudeCode;
   let obj = readJSON(filePath) || {};
@@ -599,6 +652,230 @@ function exportCDConfig(id, stripKey) {
   return { name: e ? e.name : '导出配置', config: obj };
 }
 
+// ========== CLAUDE CODE CLI — MULTI-CONFIG (PRESET) MANAGEMENT ==========
+// Claude Code 原生只有一个 ~/.claude/settings.json，没有官方的多配置库。
+// 因此由 RelayManager 自己维护一份预设清单 cc-configs.json：
+//   { appliedId, entries:[{id,name,config:{...CC 字段...}}] }
+// “切换/应用”=把选中预设的 config 写进 settings.json（沿用 writeClaudeCode，
+// 自动备份+原子写），从而符合既定工作流：填参→建映射→写客户端实际读取的配置。
+// 该文件含密钥，已在 .gitignore 中忽略，禁止提交。
+const CC_CONFIGS_PATH = path.join(__dirname, 'cc-configs.json');
+const CODEX_CONFIGS_PATH = PATHS.codexCliStore;
+
+function readCCStore() {
+  const obj = readJSON(CC_CONFIGS_PATH);
+  if (!obj || !Array.isArray(obj.entries)) return { appliedId: '', entries: [] };
+  return { appliedId: obj.appliedId || '', entries: obj.entries };
+}
+async function writeCCStore(store) {
+  await backupFile(CC_CONFIGS_PATH);
+  await atomicWrite(CC_CONFIGS_PATH, JSON.stringify(store, null, 2) + '\n');
+}
+
+// 只保留 Claude Code 认得的字段，防止导入脏数据污染预设。
+function sanitizeCCConfig(d) {
+  d = d || {};
+  const str = v => (v === undefined || v === null) ? '' : String(v);
+  return {
+    baseUrl: str(d.baseUrl),
+    authToken: str(d.authToken !== undefined ? d.authToken : d.apiKey),
+    opusModel: str(d.opusModel),
+    sonnetModel: str(d.sonnetModel),
+    haikuModel: str(d.haikuModel),
+    model: str(d.model),
+    reasoningModel: str(d.reasoningModel),
+    subagentModel: str(d.subagentModel),
+    effortLevel: d.effortLevel || 'high',
+    apiTimeoutMs: str(d.apiTimeoutMs || '3000000'),
+    // 复选项可能以布尔或 '0'/'1' 传入，统一存成 '0'/'1' 字符串。
+    disableNonessential: (d.disableNonessential === false || d.disableNonessential === '0' || d.disableNonessential === 0) ? '0' : '1',
+    attributionHeader: (d.attributionHeader === '1' || d.attributionHeader === 1 || d.attributionHeader === true) ? '1' : '0',
+    thinkingMode: ['adaptive', 'fixed', 'off'].includes(d.thinkingMode) ? d.thinkingMode : 'adaptive',
+    thinkingBudget: str(d.thinkingBudget || '10000'),
+  };
+}
+
+function listCCConfigs() {
+  const store = readCCStore();
+  const configs = store.entries.map(e => ({
+    id: e.id,
+    name: e.name || '(未命名)',
+    baseUrl: (e.config && e.config.baseUrl) || '',
+    applied: e.id === store.appliedId,
+  }));
+  return { appliedId: store.appliedId || '', configs };
+}
+
+async function createCCConfig(name, configData) {
+  const store = readCCStore();
+  const id = require('crypto').randomUUID();
+  store.entries.push({ id, name: name || '新配置', config: sanitizeCCConfig(configData) });
+  if (!store.appliedId) store.appliedId = id; // 第一份预设默认生效
+  await writeCCStore(store);
+  return id;
+}
+
+// 应用预设：标记 appliedId 并把内容写入 Claude Code 实际读取的 settings.json。
+async function applyCCConfig(id) {
+  const store = readCCStore();
+  const e = store.entries.find(x => x.id === id);
+  if (!e) throw new Error('配置不存在: ' + id);
+  store.appliedId = id;
+  await writeCCStore(store);
+  await writeClaudeCode(e.config || {}); // 沿用既有写入逻辑（含备份+跳过引导）
+  return id;
+}
+
+// 更新预设内容（保存表单时让“生效中”的预设与 settings.json 保持一致）。
+async function updateCCConfig(id, configData) {
+  const store = readCCStore();
+  const e = store.entries.find(x => x.id === id);
+  if (!e) throw new Error('配置不存在: ' + id);
+  e.config = sanitizeCCConfig(configData);
+  await writeCCStore(store);
+  if (store.appliedId === id) {
+    await writeClaudeCode(e.config || {});
+  }
+  return id;
+}
+
+async function deleteCCConfig(id) {
+  const store = readCCStore();
+  store.entries = store.entries.filter(e => e.id !== id);
+  if (store.appliedId === id) store.appliedId = ''; // 删除生效预设后，无预设再与 settings.json 对应
+  await writeCCStore(store);
+  return store.appliedId;
+}
+
+async function renameCCConfig(id, name) {
+  const store = readCCStore();
+  const e = store.entries.find(x => x.id === id);
+  if (!e) throw new Error('配置不存在');
+  e.name = (name || '').trim() || e.name;
+  await writeCCStore(store);
+}
+
+function exportCCConfig(id, stripKey) {
+  const store = readCCStore();
+  const e = store.entries.find(x => x.id === id);
+  const config = e ? Object.assign({}, e.config) : {};
+  // 分享时可去除密钥，避免泄露。
+  if (stripKey) config.authToken = '';
+  return { name: e ? e.name : '导出配置', config };
+}
+
+// ========== CODEX CLI — 多套配置（预设）管理 ==========
+// Codex CLI 原生只有一个 ~/.codex/config.toml，没有官方的多配置库。
+// 与 Claude Code 一致，由 RelayManager 自维护预设清单 codex-cli-configs.json：
+//   { appliedId, entries:[{id,name,config:{...Codex 字段...}}] }
+// “切换/应用”=把选中预设的 config 经 writeCodexCli 写进 config.toml（TOML
+// parse→modify→stringify，绝不回退正则；自动备份+原子写），符合既定工作流。
+// 该文件含密钥，已 gitignore，禁止提交。CODEX_CONFIGS_PATH 已在上方定义。
+
+function readCodexStore() {
+  const obj = readJSON(CODEX_CONFIGS_PATH);
+  if (!obj || !Array.isArray(obj.entries)) return { appliedId: '', entries: [] };
+  return { appliedId: obj.appliedId || '', entries: obj.entries };
+}
+async function writeCodexStore(store) {
+  await backupFile(CODEX_CONFIGS_PATH);
+  await atomicWrite(CODEX_CONFIGS_PATH, JSON.stringify(store, null, 2) + '\n');
+}
+
+function sanitizeCodexConfig(d) {
+  d = d || {};
+  const str = v => (v === undefined || v === null) ? '' : String(v);
+  let headers = {};
+  if (d.httpHeaders && typeof d.httpHeaders === 'object') {
+    for (const k of Object.keys(d.httpHeaders)) {
+      if (k && k.trim() !== '') headers[k.trim()] = str(d.httpHeaders[k]);
+    }
+  }
+  return {
+    baseUrl: str(d.baseUrl),
+    apiKey: str(d.apiKey),
+    model: str(d.model || 'gpt-5.5'),
+    modelProvider: str(d.modelProvider || 'custom') || 'custom',
+    providerName: str(d.providerName || 'My Codex'),
+    wireApi: ['responses', 'chat'].includes(d.wireApi) ? d.wireApi : 'responses',
+    requiresOpenaiAuth: d.requiresOpenaiAuth !== false,
+    reasoningEffort: ['low', 'medium', 'high', 'xhigh'].includes(d.reasoningEffort) ? d.reasoningEffort : 'high',
+    reasoningSummary: ['auto', 'concise', 'detailed', 'none'].includes(d.reasoningSummary) ? d.reasoningSummary : 'auto',
+    verbosity: ['', 'low', 'medium', 'high'].includes(d.verbosity) ? d.verbosity : '',
+    disableResponseStorage: d.disableResponseStorage === true || d.disableResponseStorage === '1' || d.disableResponseStorage === 1,
+    httpHeaders: headers,
+    requestMaxRetries: str(d.requestMaxRetries),
+    streamMaxRetries: str(d.streamMaxRetries),
+    streamIdleTimeoutMs: str(d.streamIdleTimeoutMs),
+  };
+}
+
+function listCodexConfigs() {
+  const store = readCodexStore();
+  const configs = store.entries.map(e => ({
+    id: e.id,
+    name: e.name || '(未命名)',
+    baseUrl: (e.config && e.config.baseUrl) || '',
+    applied: e.id === store.appliedId,
+  }));
+  return { appliedId: store.appliedId || '', configs };
+}
+
+async function createCodexConfig(name, configData) {
+  const store = readCodexStore();
+  const id = require('crypto').randomUUID();
+  store.entries.push({ id, name: name || '新配置', config: sanitizeCodexConfig(configData) });
+  if (!store.appliedId) store.appliedId = id;
+  await writeCodexStore(store);
+  return id;
+}
+
+async function applyCodexConfig(id) {
+  const store = readCodexStore();
+  const e = store.entries.find(x => x.id === id);
+  if (!e) throw new Error('配置不存在: ' + id);
+  store.appliedId = id;
+  await writeCodexStore(store);
+  await writeCodexCli(e.config || {});
+  return id;
+}
+
+async function updateCodexConfig(id, configData) {
+  const store = readCodexStore();
+  const e = store.entries.find(x => x.id === id);
+  if (!e) throw new Error('配置不存在: ' + id);
+  e.config = sanitizeCodexConfig(configData);
+  await writeCodexStore(store);
+  if (store.appliedId === id) {
+    await writeCodexCli(e.config || {});
+  }
+  return id;
+}
+
+async function deleteCodexConfig(id) {
+  const store = readCodexStore();
+  store.entries = store.entries.filter(e => e.id !== id);
+  if (store.appliedId === id) store.appliedId = '';
+  await writeCodexStore(store);
+  return store.appliedId;
+}
+
+async function renameCodexConfig(id, name) {
+  const store = readCodexStore();
+  const e = store.entries.find(x => x.id === id);
+  if (!e) throw new Error('配置不存在');
+  e.name = (name || '').trim() || e.name;
+  await writeCodexStore(store);
+}
+
+function exportCodexConfig(id, stripKey) {
+  const store = readCodexStore();
+  const e = store.entries.find(x => x.id === id);
+  const config = e ? Object.assign({}, e.config) : {};
+  if (stripKey) config.apiKey = '';
+  return { name: e ? e.name : '导出配置', config };
+}
+
 async function writeCodexCli(data) {
   const filePath = PATHS.codexCli;
 
@@ -621,22 +898,66 @@ async function writeCodexCli(data) {
     obj = {}; // fresh file
   }
 
-  // Ensure the nested provider table exists: [model_providers.custom]
+  // 用实际的 model_provider 值作为表键，与 readCodexCli 保持对称；默认回退 'custom'。
+  const providerKey = (data.modelProvider || 'custom').trim() || 'custom';
   if (!obj.model_providers || typeof obj.model_providers !== 'object') obj.model_providers = {};
-  if (!obj.model_providers.custom || typeof obj.model_providers.custom !== 'object') obj.model_providers.custom = {};
-  const custom = obj.model_providers.custom;
+  if (!obj.model_providers[providerKey] || typeof obj.model_providers[providerKey] !== 'object') obj.model_providers[providerKey] = {};
+  const custom = obj.model_providers[providerKey];
 
   // Provider-scoped keys
   custom.base_url = (data.baseUrl || '').trim();
   custom.experimental_bearer_token = (data.apiKey || '').trim();
+  // 使用 experimental_bearer_token 直接传令牌时，移除 env_key，
+  // 避免 Codex CLI 因缺少 AGENT_ROUTER_TOKEN 等环境变量而报错。
+  delete custom.env_key;
   if (data.providerName !== undefined) custom.name = data.providerName;
   if (data.wireApi !== undefined) custom.wire_api = data.wireApi;
   if (data.requiresOpenaiAuth !== undefined) custom.requires_openai_auth = !!data.requiresOpenaiAuth;
+
+  // Provider-scoped 高级字段：自定义请求头 + 网络重试/超时。
+  // 自定义请求头：空对象时删除该键，避免写出空表。
+  if (data.httpHeaders !== undefined) {
+    const hh = (data.httpHeaders && typeof data.httpHeaders === 'object') ? data.httpHeaders : {};
+    const keys = Object.keys(hh).filter(k => k.trim() !== '');
+    if (keys.length) {
+      const clean = {};
+      for (const k of keys) clean[k.trim()] = String(hh[k]); // 值统一转字符串
+      custom.http_headers = clean;
+    } else {
+      delete custom.http_headers;
+    }
+  }
+  // 数字字段：空串=删除该键（恢复 Codex 默认值）；否则写入整数。
+  const setIntOrDelete = (obj, key, val) => {
+    if (val === undefined) return;
+    const s = String(val).trim();
+    if (s === '') { delete obj[key]; return; }
+    const n = parseInt(s, 10);
+    if (!Number.isNaN(n)) obj[key] = n;
+  };
+  setIntOrDelete(custom, 'request_max_retries', data.requestMaxRetries);
+  setIntOrDelete(custom, 'stream_max_retries', data.streamMaxRetries);
+  setIntOrDelete(custom, 'stream_idle_timeout_ms', data.streamIdleTimeoutMs);
 
   // Top-level keys
   if (data.model) obj.model = data.model;
   if (data.modelProvider) obj.model_provider = data.modelProvider;
   if (data.reasoningEffort) obj.model_reasoning_effort = data.reasoningEffort;
+
+  // Top-level 高级字段。
+  if (data.reasoningSummary !== undefined && String(data.reasoningSummary).trim() !== '') {
+    obj.model_reasoning_summary = data.reasoningSummary; // auto/concise/detailed/none
+  }
+  // verbosity 为空串时删除该键（不设置）。
+  if (data.verbosity !== undefined) {
+    const v = String(data.verbosity).trim();
+    if (v === '') delete obj.model_verbosity; else obj.model_verbosity = v;
+  }
+  // disable_response_storage 为布尔；false 时删除键以保持文件干净（等价默认）。
+  if (data.disableResponseStorage !== undefined) {
+    if (data.disableResponseStorage) obj.disable_response_storage = true;
+    else delete obj.disable_response_storage;
+  }
 
   // Stringify back to TOML. @iarna/toml handles escaping/quoting correctly.
   let out;
@@ -650,6 +971,47 @@ async function writeCodexCli(data) {
   // Make sure the directory exists (fresh install case).
   await fsp.mkdir(path.dirname(filePath), { recursive: true });
   await atomicWrite(filePath, out);
+
+  // 同步将 API Key 写入 ~/.codex/.env，确保 Codex CLI 的 env_key 机制
+  // （如 env_key = "AGENT_ROUTER_TOKEN"）也能正常读取到令牌。
+  if (data.apiKey && String(data.apiKey).trim()) {
+    await writeCodexEnv('AGENT_ROUTER_TOKEN', String(data.apiKey).trim());
+  }
+}
+
+// 将指定环境变量写入 ~/.codex/.env，同时保留已有的非代理类变量。
+// 代理变量（HTTP_PROXY 等）由 writeProxy 管理，此函数不触碰它们。
+async function writeCodexEnv(key, value) {
+  const filePath = PATHS.proxyEnv;
+  const proxyKeys = new Set([
+    'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'WS_PROXY', 'WSS_PROXY', 'NO_PROXY',
+    'http_proxy', 'https_proxy', 'all_proxy', 'ws_proxy', 'wss_proxy', 'no_proxy',
+  ]);
+  // 读取现有文件，保留非代理行
+  const lines = [];
+  let foundKey = false;
+  try {
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    for (const line of raw.split('\n')) {
+      const m = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)/);
+      if (m && m[1] === key) {
+        lines.push(`${key}=${value}`);
+        foundKey = true;
+      } else if (m && proxyKeys.has(m[1])) {
+        // 代理行由 writeProxy 管理，保留原样
+        lines.push(line);
+      } else {
+        // 非代理行（注释、空行、其他 env）保留
+        lines.push(line);
+      }
+    }
+  } catch (e) {
+    // 文件不存在，从头创建
+  }
+  if (!foundKey) lines.push(`${key}=${value}`);
+
+  await fsp.mkdir(path.dirname(filePath), { recursive: true });
+  await fsp.writeFile(filePath, lines.join('\n') + '\n', 'utf-8');
 }
 
 async function writeCodexDesktop(data) {
@@ -685,7 +1047,25 @@ async function writeProxy(data) {
   const wsOn = data.wsProxy !== undefined ? data.wsProxy : true;
   const wssOn = data.wssProxy !== undefined ? data.wssProxy : true;
 
-  const content = `# Clash Verge / mihomo mixed proxy
+  // 代理变量名集合（含大小写变体）
+  const proxyKeys = new Set([
+    'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'WS_PROXY', 'WSS_PROXY', 'NO_PROXY',
+    'http_proxy', 'https_proxy', 'all_proxy', 'ws_proxy', 'wss_proxy', 'no_proxy',
+  ]);
+
+  // 从现有 .env 文件中保留非代理的行（如 AGENT_ROUTER_TOKEN），避免被代理覆写覆盖
+  const preservedLines = [];
+  try {
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    for (const line of raw.split('\n')) {
+      const m = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)/);
+      if (m && !proxyKeys.has(m[1])) {
+        preservedLines.push(line);
+      }
+    }
+  } catch (e) { /* 文件不存在，无需保留 */ }
+
+  const proxyBlock = `# Clash Verge / mihomo mixed proxy
 HTTP_PROXY=${proxyUrl}
 HTTPS_PROXY=${proxyUrl}
 ALL_PROXY=${proxyUrl}
@@ -695,6 +1075,10 @@ all_proxy=${proxyUrl}
 NO_PROXY=${noProxy}
 no_proxy=${noProxy}
 ${wsOn ? `WS_PROXY=${proxyUrl}\nws_proxy=${proxyUrl}\n` : ''}${wssOn ? `WSS_PROXY=${proxyUrl}\nwss_proxy=${proxyUrl}\n` : ''}`;
+
+  const content = preservedLines.length > 0
+    ? preservedLines.join('\n') + '\n' + proxyBlock
+    : proxyBlock;
 
   await backupFile(filePath);
   await atomicWrite(filePath, content);
@@ -767,6 +1151,9 @@ async function syncAll(data) {
   const baseUrl = sync.baseUrl;
   const apiKey = sync.apiKey || '';
   const backups = [];
+
+  // 中文注释：按产品开关执行同步，保持原有保存链路不变。
+  // 新增产品可在前端先回填字段，再复用这里的持久化写入逻辑。
 
   // 1. Claude Code CLI
   if (sync.claudeCode !== false) {
@@ -1660,6 +2047,7 @@ const server = http.createServer(async (req, res) => {
         codexCli: readCodexCli(),
         codexDesktop: readCodexDesktop(),
         proxy: readProxy(),
+        uiSettings: readUiSettings(),
       };
       const r = json(state);
       res.writeHead(r.code, { 'Content-Type': r.type });
@@ -1694,9 +2082,9 @@ const server = http.createServer(async (req, res) => {
         await writeProxy(data.proxy);
         backups.push('proxy-.env');
       }
-      if (data.syncAll) {
-        const syncBackups = await syncAll({ syncAll: data.syncAll });
-        backups.push(...syncBackups);
+      if (data.uiSettings) {
+        await writeUiSettings(data.uiSettings);
+        backups.push('ui-settings.json');
       }
 
       const r = json({ success: true, backups });
@@ -1976,6 +2364,141 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // ===== Claude Code CLI — 多套配置（预设）管理 =====
+    // GET /api/claude-code/configs — 列出全部预设 + 当前生效 id
+    if (method === 'GET' && url.pathname === '/api/claude-code/configs') {
+      const r = json(listCCConfigs());
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+    // POST /api/claude-code/config/create — { name, config? }（config? = 导入/复制内容）
+    if (method === 'POST' && url.pathname === '/api/claude-code/config/create') {
+      const data = JSON.parse(body || '{}');
+      const id = await createCCConfig(data.name, data.config);
+      const r = json({ success: true, id, configs: listCCConfigs() });
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+    // POST /api/claude-code/config/apply — { id } 写入 settings.json 并标记生效
+    if (method === 'POST' && url.pathname === '/api/claude-code/config/apply') {
+      const data = JSON.parse(body || '{}');
+      try {
+        await applyCCConfig(data.id);
+        const r = json({ success: true, configs: listCCConfigs() });
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+      } catch (e) {
+        const r = error(e.message, 400);
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+      }
+    }
+    // POST /api/claude-code/config/update — { id, config } 更新预设内容（保存时同步）
+    if (method === 'POST' && url.pathname === '/api/claude-code/config/update') {
+      const data = JSON.parse(body || '{}');
+      try {
+        await updateCCConfig(data.id, data.config);
+        const r = json({ success: true, configs: listCCConfigs() });
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+      } catch (e) {
+        const r = error(e.message, 400);
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+      }
+    }
+    // POST /api/claude-code/config/import — { name, config } 导入后创建并返回新 id
+    if (method === 'POST' && url.pathname === '/api/claude-code/config/import') {
+      const data = JSON.parse(body || '{}');
+      try {
+        const id = await createCCConfig(data.name, data.config);
+        const r = json({ success: true, id, configs: listCCConfigs() });
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+      } catch (e) {
+        const r = error(e.message, 400);
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+      }
+    }
+    // POST /api/claude-code/config/delete — { id }
+    if (method === 'POST' && url.pathname === '/api/claude-code/config/delete') {
+      const data = JSON.parse(body || '{}');
+      const appliedId = await deleteCCConfig(data.id);
+      const r = json({ success: true, appliedId, configs: listCCConfigs() });
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+    // POST /api/claude-code/config/rename — { id, name }
+    if (method === 'POST' && url.pathname === '/api/claude-code/config/rename') {
+      const data = JSON.parse(body || '{}');
+      await renameCCConfig(data.id, data.name);
+      const r = json({ success: true, configs: listCCConfigs() });
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+    // GET /api/claude-code/config/export?id=...&stripKey=1 — 下载可移植 JSON
+    if (method === 'GET' && url.pathname === '/api/claude-code/config/export') {
+      const id = url.searchParams.get('id');
+      if (!id) { const r = error('Missing id', 400); res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return; }
+      const stripKey = url.searchParams.get('stripKey') === '1';
+      const payload = exportCCConfig(id, stripKey);
+      const suffix = stripKey ? '-nokey' : '';
+      const fname = 'claude-code-' + (payload.name || 'config').replace(/[^\w.-]+/g, '_') + suffix + '.json';
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Disposition': 'attachment; filename="' + fname + '"',
+      });
+      res.end(JSON.stringify(payload, null, 2));
+      return;
+    }
+
+    // ===== CODEX CLI 预设配置路由 =====
+    // GET /api/codex-cli/config/list — 列出全部预设及当前应用项
+    if (method === 'GET' && url.pathname === '/api/codex-cli/config/list') {
+      const r = json(listCodexConfigs());
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+    // POST /api/codex-cli/config/create — 新建预设 { name, config }
+    if (method === 'POST' && url.pathname === '/api/codex-cli/config/create') {
+      const data = JSON.parse(body || '{}');
+      const id = await createCodexConfig(data.name, data.config);
+      const r = json({ success: true, id, configs: listCodexConfigs() });
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+    // POST /api/codex-cli/config/apply — 应用预设 { id }（写入 config.toml）
+    if (method === 'POST' && url.pathname === '/api/codex-cli/config/apply') {
+      const data = JSON.parse(body || '{}');
+      await applyCodexConfig(data.id);
+      const r = json({ success: true, configs: listCodexConfigs() });
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+    // POST /api/codex-cli/config/update — 更新预设 { id, config }
+    if (method === 'POST' && url.pathname === '/api/codex-cli/config/update') {
+      const data = JSON.parse(body || '{}');
+      await updateCodexConfig(data.id, data.config);
+      const r = json({ success: true, configs: listCodexConfigs() });
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+// POST /api/codex-cli/config/delete — 删除预设 { id }
+    if (method === 'POST' && url.pathname === '/api/codex-cli/config/delete') {
+      const data = JSON.parse(body || '{}');
+      const appliedId = await deleteCodexConfig(data.id);
+      const r = json({ success: true, appliedId, configs: listCodexConfigs() });
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+    // POST /api/codex-cli/config/rename — 重命名预设 { id, name }
+    if (method === 'POST' && url.pathname === '/api/codex-cli/config/rename') {
+      const data = JSON.parse(body || '{}');
+      await renameCodexConfig(data.id, data.name);
+      const r = json({ success: true, configs: listCodexConfigs() });
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+    // GET /api/codex-cli/config/export?id=...&stripKey=1 — 下载可移植 JSON
+    if (method === 'GET' && url.pathname === '/api/codex-cli/config/export') {
+      const id = url.searchParams.get('id');
+      if (!id) { const r = error('Missing id', 400); res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return; }
+      const stripKey = url.searchParams.get('stripKey') === '1';
+      const payload = exportCodexConfig(id, stripKey);
+      const suffix = stripKey ? '-nokey' : '';
+      const fname = 'codex-cli-' + (payload.name || 'config').replace(/[^\w.-]+/g, '_') + suffix + '.json';
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Disposition': 'attachment; filename="' + fname + '"',
+      });
+      res.end(JSON.stringify(payload, null, 2));
+      return;
+    }
     // ===== Feature #2: GET /api/gateway/models — sync model list from upstream =====
     // Uses the gateway's configured upstream Base URL + key (or query overrides) to
     // fetch /v1/models, returning the list of model IDs.

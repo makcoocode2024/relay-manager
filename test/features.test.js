@@ -16,6 +16,8 @@ const { spawn } = require('child_process');
 const ROOT = path.join(__dirname, '..');
 const GATEWAY_JSON = path.join(ROOT, 'gateway.json');
 const GATEWAY_BAK = path.join(ROOT, 'gateway.json.featbak');
+const UI_SETTINGS_JSON = path.join(ROOT, 'ui-settings.json');
+const UI_SETTINGS_BAK = path.join(ROOT, 'ui-settings.json.featbak');
 const MAIN_PORT = 9876;
 
 let pass = 0, fail = 0;
@@ -23,10 +25,14 @@ const check = (n, ok) => { console.log((ok ? 'PASS' : 'FAIL') + ': ' + n); ok ? 
 
 let hadConfig = false;
 if (fs.existsSync(GATEWAY_JSON)) { fs.copyFileSync(GATEWAY_JSON, GATEWAY_BAK); hadConfig = true; }
+let hadUiSettings = false;
+if (fs.existsSync(UI_SETTINGS_JSON)) { fs.copyFileSync(UI_SETTINGS_JSON, UI_SETTINGS_BAK); hadUiSettings = true; }
 function cleanup() {
   try {
     if (hadConfig) { fs.copyFileSync(GATEWAY_BAK, GATEWAY_JSON); fs.unlinkSync(GATEWAY_BAK); }
     else if (fs.existsSync(GATEWAY_JSON)) fs.unlinkSync(GATEWAY_JSON);
+    if (hadUiSettings) { fs.copyFileSync(UI_SETTINGS_BAK, UI_SETTINGS_JSON); fs.unlinkSync(UI_SETTINGS_BAK); }
+    else if (fs.existsSync(UI_SETTINGS_JSON)) fs.unlinkSync(UI_SETTINGS_JSON);
     const log = path.join(ROOT, 'gateway-requests.log');
     if (fs.existsSync(log)) fs.unlinkSync(log);
   } catch (e) {}
@@ -76,6 +82,17 @@ function del(p, cb) {
     res => { let b = ''; res.on('data', c => b += c); res.on('end', () => cb(res.statusCode, b)); });
   req.on('error', e => cb(0, 'ERR ' + e.message)); req.end();
 }
+function post(p, body, cb) {
+  const data = JSON.stringify(body);
+  const req = http.request({
+    host: '127.0.0.1',
+    port: MAIN_PORT,
+    path: p,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data), Host: 'localhost:' + MAIN_PORT },
+  }, res => { let b = ''; res.on('data', c => b += c); res.on('end', () => cb(res.statusCode, b)); });
+  req.on('error', e => cb(0, 'ERR ' + e.message)); req.write(data); req.end();
+}
 function gwPost(port, p, body, cb) {
   const data = JSON.stringify(body);
   const req = http.request({ host: '127.0.0.1', port, path: p, method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data), Host: '127.0.0.1:' + port } },
@@ -123,8 +140,18 @@ function runTests(upPort, done) {
                     let j7 = {}; try { j7 = JSON.parse(b7); } catch (e) {}
                     check('test-message has duration_ms', typeof j7.duration_ms === 'number');
                     check('test-message detected 2 models', j7.modelsDetected === 2);
-                    console.log(`\n=== ${pass} passed, ${fail} failed ===`);
-                    done(fail > 0 ? 1 : 0);
+                    post('/api/save', { uiSettings: { theme: 'modern', sidebarLayout: 'sidebar' } }, (c8, b8) => {
+                      let j8 = {}; try { j8 = JSON.parse(b8); } catch (e) {}
+                      check('ui settings save reports backup', Array.isArray(j8.backups) && j8.backups.includes('ui-settings.json'));
+
+                      get('/api/state', (c9, b9) => {
+                        let j9 = {}; try { j9 = JSON.parse(b9); } catch (e) {}
+                        check('ui settings round-trip theme', j9.uiSettings && j9.uiSettings.theme === 'modern');
+                        check('ui settings round-trip layout', j9.uiSettings && j9.uiSettings.sidebarLayout === 'sidebar');
+                        console.log(`\n=== ${pass} passed, ${fail} failed ===`);
+                        done(fail > 0 ? 1 : 0);
+                      });
+                    });
                   });
                 });
               });

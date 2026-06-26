@@ -4,6 +4,10 @@ node_modules/
 # 含密钥的本地配置（切勿提交！）
 gateway.json
 paths.json
+cc-configs.json
+
+# 备份文件（时间戳备份，切勿提交）
+*.bak_*
 
 # 日志
 *.log
