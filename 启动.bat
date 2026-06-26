@@ -1,16 +1,15 @@
 @echo off
-title RelayManager - 中转站配置工具
-
+title RelayManager
 cd /d "%~dp0"
 
 echo ============================================
-echo   RelayManager 中转站配置工具
+echo   RelayManager - Relay Config Tool
 echo ============================================
 echo.
-echo 正在启动服务...
-echo 浏览器请访问: http://localhost:9876
+echo Starting server...
+echo URL: http://localhost:9876
 echo.
-echo 关闭此窗口即可停止服务
+echo Close this window to stop the service
 echo --------------------------------------------
 echo.
 

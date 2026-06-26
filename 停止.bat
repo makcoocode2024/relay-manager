@@ -1,20 +1,20 @@
 @echo off
-title 停止 RelayManager
+title Stop RelayManager
 
 echo ============================================
-echo   停止 RelayManager 服务
+echo   Stop RelayManager Service
 echo ============================================
 echo.
 
-echo 正在查找并停止 node 服务进程...
+echo Searching for node process on port 9876...
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":9876 " ^| findstr "LISTENING"') do (
-    echo 找到服务进程 PID: %%a
-    taskkill /f /pid %%a >nul 2>&1
-    echo 已停止进程 %%a
+    echo Found PID: %%a
+    taskkill /f /pid %%a >/dev/null 2>&1
+    echo Stopped process %%a
 )
 
 echo.
 echo --------------------------------------------
-echo 如未完全停止，可手动关闭运行服务的命令行窗口
+echo If not fully stopped, close the running cmd window manually
 echo --------------------------------------------
 pause
