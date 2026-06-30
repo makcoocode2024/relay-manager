@@ -3,12 +3,42 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
 const os = require('os');
-const { execSync, spawn } = require('child_process');
+const { execSync, execFileSync, spawn } = require('child_process');
 const toml = require('@iarna/toml');
 const net = require('net');
 const debugLog = require('./lib/debugLog');
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) || 9876 : 9876;
+const AGENT_BRIDGE_DIR = path.join(__dirname, '.ai-bridge');
+const AGENT_BRIDGE_MAX_TEXT_BYTES = 256 * 1024;
+const COPILOT_DEFAULT_BASE_URL = 'http://127.0.0.1:8000/v1';
+const COPILOT_DEFAULT_API_KEY = 'unused';
+const COPILOT_DEFAULT_MODEL = 'copilot';
+const COPILOT_API_DEFAULT_DIR = process.env.COPILOT_API_DIR || (process.platform === 'win32'
+  ? 'G:\\001\\Windows-Copilot-API'
+  : path.join(os.homedir(), 'Windows-Copilot-API'));
+const COPILOT_API_DEFAULT_PORT = process.env.COPILOT_API_PORT || '8000';
+const COPILOT_PROXY_ENV_KEYS = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'WS_PROXY', 'WSS_PROXY'];
+const HANDOFF_FILES = {
+  plan: 'current-plan.md',
+  status: 'agent-status.md',
+  diff: 'implementation-diff.patch',
+  context: 'pro-context.md',
+  log: 'execution-log.jsonl',
+};
+let managedCopilotApi = {
+  child: null,
+  pid: null,
+  startedAt: '',
+  stoppedAt: '',
+  exitCode: null,
+  projectDir: '',
+  pythonPath: '',
+  port: '',
+  proxyUrl: '',
+  noProxy: '',
+  log: '',
+};
 
 // ========== PLATFORM DETECTION ==========
 // Requirement #5: cross-platform Windows / macOS. We branch on process.platform
@@ -285,6 +315,732 @@ async function pruneBackups(backupDir, base, ext) {
       await fsp.unlink(path.join(backupDir, mine[i])).catch(() => {});
     }
   } catch (e) { /* pruning is best-effort */ }
+}
+
+// ========== AGENT BRIDGE HELPERS ==========
+
+function bridgeCommands() {
+  return {
+    install: 'npm install -g codexpro',
+    setup: 'codexpro setup',
+    start: 'codexpro start',
+    dashboard: 'codexpro admin',
+    dryRun: 'codexpro execute-handoff --agent codex --dry-run',
+    run: 'codexpro execute-handoff --agent codex --yes',
+  };
+}
+
+function bridgeFileName(name) {
+  const requested = String(name || '').trim();
+  const allowed = Object.values(HANDOFF_FILES);
+  if (!allowed.includes(requested)) throw new Error('Unsupported handoff file: ' + requested);
+  return requested;
+}
+
+function bridgeFilePath(name) {
+  const fileName = bridgeFileName(name);
+  const full = path.resolve(AGENT_BRIDGE_DIR, fileName);
+  const root = path.resolve(AGENT_BRIDGE_DIR);
+  if (full !== root && !full.startsWith(root + path.sep)) throw new Error('Invalid handoff path');
+  return full;
+}
+
+function readTextBounded(filePath, maxBytes = AGENT_BRIDGE_MAX_TEXT_BYTES) {
+  try {
+    const stat = fs.statSync(filePath);
+    const fd = fs.openSync(filePath, 'r');
+    const length = Math.min(stat.size, maxBytes);
+    const buffer = Buffer.alloc(length);
+    fs.readSync(fd, buffer, 0, length, 0);
+    fs.closeSync(fd);
+    return {
+      exists: true,
+      size: stat.size,
+      mtime: stat.mtime.toISOString(),
+      truncated: stat.size > maxBytes,
+      content: buffer.toString('utf-8'),
+    };
+  } catch (e) {
+    if (e.code === 'ENOENT') return { exists: false, size: 0, mtime: '', truncated: false, content: '' };
+    throw e;
+  }
+}
+
+function readBridgeFile(name) {
+  const filePath = bridgeFilePath(name);
+  return { name: bridgeFileName(name), path: filePath, ...readTextBounded(filePath) };
+}
+
+function bridgeFileSummaries() {
+  return Object.entries(HANDOFF_FILES).map(([key, fileName]) => {
+    const filePath = bridgeFilePath(fileName);
+    const info = readTextBounded(filePath, 4096);
+    return {
+      key,
+      name: fileName,
+      path: filePath,
+      exists: info.exists,
+      size: info.size,
+      mtime: info.mtime,
+      truncated: info.truncated,
+      preview: info.content,
+    };
+  });
+}
+
+async function writeBridgeFile(name, content, overwrite) {
+  const filePath = bridgeFilePath(name);
+  const text = String(content || '');
+  if (Buffer.byteLength(text, 'utf-8') > AGENT_BRIDGE_MAX_TEXT_BYTES) {
+    throw new Error('Handoff content is too large');
+  }
+  await fsp.mkdir(AGENT_BRIDGE_DIR, { recursive: true });
+  if (fs.existsSync(filePath) && !overwrite) {
+    const err = new Error('File already exists');
+    err.code = 'EEXIST';
+    throw err;
+  }
+  if (fs.existsSync(filePath)) await backupFile(filePath);
+  await atomicWrite(filePath, text.replace(/\r\n/g, '\n'));
+  return readBridgeFile(name);
+}
+
+function commandLocation(commandName) {
+  try {
+    const cmd = IS_WIN ? 'where' : 'sh';
+    const args = IS_WIN ? [commandName] : ['-lc', 'command -v ' + commandName];
+    const out = execFileSync(cmd, args, { encoding: 'utf-8', timeout: 4000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    return out.split(/\r?\n/).map(x => x.trim()).filter(Boolean)[0] || '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function commandVersion(commandName, args) {
+  try {
+    args = args || ['--version'];
+    const out = IS_WIN
+      ? execSync([commandName, ...args].join(' '), { encoding: 'utf-8', timeout: 5000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+      : execFileSync(commandName, args, { encoding: 'utf-8', timeout: 5000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    return { ok: true, output: out.trim() };
+  } catch (e) {
+    return { ok: false, output: ((e.stdout || '') + (e.stderr || '') || e.message).trim() };
+  }
+}
+
+function getCodexProStatus() {
+  const location = commandLocation('codexpro');
+  const version = commandVersion('codexpro', ['--version']);
+  const listening = isPortListening(8787);
+  return {
+    installed: !!location || version.ok,
+    location,
+    version: version.ok ? version.output : '',
+    versionError: version.ok ? '' : version.output,
+    defaultPortListening: listening,
+  };
+}
+
+function getGitSummary() {
+  try {
+    const out = execSync('git status --short', { cwd: __dirname, encoding: 'utf-8', timeout: 5000, windowsHide: true });
+    const lines = out.split(/\r?\n/).filter(Boolean);
+    return { available: true, clean: lines.length === 0, changed: lines.length, lines: lines.slice(0, 80) };
+  } catch (e) {
+    return { available: false, clean: false, changed: 0, lines: [], error: e.message };
+  }
+}
+
+function buildOpenAIEndpoint(baseUrl, endpoint) {
+  const u = new URL(baseUrl);
+  const cleanEndpoint = String(endpoint || '').replace(/^\/+/, '');
+  const apiPath = u.pathname.replace(/\/+$/, '');
+  const versionEndpoint = apiPath.match(/^(.*\/v\d+)(?:\/(?:models|chat\/completions|responses))?$/);
+  if (versionEndpoint) return u.origin + versionEndpoint[1] + '/' + cleanEndpoint;
+  if (/\/v\d+$/.test(apiPath)) return u.origin + apiPath + '/' + cleanEndpoint;
+  if (apiPath === '') return u.origin + '/v1/' + cleanEndpoint;
+  return u.origin + apiPath + '/v1/' + cleanEndpoint;
+}
+
+function requestJsonEndpoint(targetUrl, options) {
+  options = options || {};
+  return new Promise((resolve) => {
+    let target;
+    try { target = new URL(targetUrl); } catch (e) { return resolve({ success: false, status: 0, error: 'Invalid URL: ' + targetUrl, errorType: 'invalid_url' }); }
+    const body = options.body ? JSON.stringify(options.body) : '';
+    const apiKey = options.apiKey || COPILOT_DEFAULT_API_KEY;
+    const headers = {
+      'Authorization': 'Bearer ' + apiKey,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      ...(options.headers || {}),
+    };
+    if (body) headers['Content-Length'] = Buffer.byteLength(body);
+    const httpModule = target.protocol === 'https:' ? require('https') : require('http');
+    const req = httpModule.request({
+      protocol: target.protocol,
+      hostname: target.hostname,
+      port: target.port || (target.protocol === 'https:' ? 443 : 80),
+      path: target.pathname + target.search,
+      method: options.method || 'GET',
+      headers,
+      timeout: options.timeoutMs || 5000,
+    }, (res) => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        let parsed = null;
+        try { parsed = JSON.parse(data); } catch (e) {}
+        const ok = res.statusCode >= 200 && res.statusCode < 300;
+        const errorObj = parsed && parsed.error && typeof parsed.error === 'object' ? parsed.error : null;
+        const errorType = errorObj ? (errorObj.type || errorObj.code || '') : '';
+        const errorMessage = errorObj
+          ? (errorObj.message || errorObj.type || errorObj.code || ('HTTP ' + res.statusCode))
+          : (data.slice(0, 300) || ('HTTP ' + res.statusCode));
+        resolve({
+          status: res.statusCode,
+          success: ok,
+          data: parsed,
+          raw: parsed ? undefined : data.slice(0, 800),
+          error: ok ? '' : errorMessage,
+          errorType: ok ? '' : errorType,
+          errorBody: ok ? '' : data.slice(0, 1200),
+        });
+      });
+    });
+    req.on('error', e => resolve({ success: false, status: 0, error: e.message, errorType: 'network_error' }));
+    req.on('timeout', () => { req.destroy(); resolve({ success: false, status: 0, error: 'Request timeout', errorType: 'request_timeout' }); });
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+async function probeCopilotAPI(baseUrl, apiKey) {
+  const targetBaseUrl = (baseUrl || COPILOT_DEFAULT_BASE_URL).trim();
+  const targetKey = (apiKey || COPILOT_DEFAULT_API_KEY).trim() || COPILOT_DEFAULT_API_KEY;
+  let modelsUrl;
+  try { modelsUrl = buildOpenAIEndpoint(targetBaseUrl, 'models'); }
+  catch (e) { return { reachable: false, baseUrl: targetBaseUrl, error: e.message, models: [] }; }
+  const result = await requestJsonEndpoint(modelsUrl, { apiKey: targetKey, timeoutMs: 3000 });
+  let models = [];
+  if (result.success && result.data) {
+    if (Array.isArray(result.data.data)) models = result.data.data.map(m => ({ id: m.id || String(m), owned_by: m.owned_by || '' }));
+    else if (Array.isArray(result.data)) models = result.data.map(m => ({ id: m.id || String(m), owned_by: m.owned_by || '' }));
+  }
+  return {
+    reachable: !!result.success,
+    baseUrl: targetBaseUrl,
+    status: result.status || 0,
+    models,
+    error: result.success ? '' : (result.error || 'Unknown error'),
+  };
+}
+
+function testOpenAIChatAPI(baseUrl, apiKey, model, opts) {
+  opts = opts || {};
+  return new Promise(async (resolve) => {
+    let chatUrl;
+    try { chatUrl = buildOpenAIEndpoint(baseUrl, 'chat/completions'); }
+    catch (e) { return resolve({ error: 'Base URL format invalid: ' + baseUrl }); }
+    const payload = {
+      model: model || COPILOT_DEFAULT_MODEL,
+      messages: [{ role: 'user', content: opts.prompt || 'ping' }],
+      max_tokens: opts.maxTokens || 64,
+      stream: false,
+    };
+    const result = await requestJsonEndpoint(chatUrl, {
+      method: 'POST',
+      apiKey: apiKey || COPILOT_DEFAULT_API_KEY,
+      body: payload,
+      timeoutMs: opts.timeoutMs || 20000,
+    });
+    if (!result.success) {
+      return resolve({
+        success: false,
+        status: result.status || 0,
+        endpoint: chatUrl,
+        error: result.error || 'Request failed',
+        errorType: result.errorType || '',
+        errorBody: result.errorBody || result.raw || '',
+      });
+    }
+    const choice = result.data && Array.isArray(result.data.choices) ? result.data.choices[0] : null;
+    const content = choice && choice.message ? choice.message.content : '';
+    resolve({ success: true, status: result.status, endpoint: chatUrl, model: payload.model, sample: content ? String(content).slice(0, 300) : 'request succeeded' });
+  });
+}
+
+function copilotProxyDefaults() {
+  const proxy = readProxy();
+  const proxyUrl = proxy.httpProxy || proxy.httpsProxy || proxy.allProxy || `http://${proxy.proxyHost || '127.0.0.1'}:${proxy.proxyPort || '7897'}`;
+  return {
+    proxyUrl,
+    noProxy: proxy.noProxy || 'localhost,127.0.0.1,::1',
+  };
+}
+
+function defaultCopilotPython(projectDir) {
+  return IS_WIN
+    ? path.join(projectDir, 'venv', 'Scripts', 'python.exe')
+    : path.join(projectDir, 'venv', 'bin', 'python');
+}
+
+function normalizeCopilotApiConfig(data) {
+  data = data || {};
+  const proxyDefaults = copilotProxyDefaults();
+  const projectDir = path.resolve(String(data.projectDir || COPILOT_API_DEFAULT_DIR).trim() || COPILOT_API_DEFAULT_DIR);
+  const rawPython = String(data.pythonPath || defaultCopilotPython(projectDir)).trim();
+  const pythonPath = path.resolve(projectDir, rawPython);
+  const port = String(data.port || COPILOT_API_DEFAULT_PORT).trim() || COPILOT_API_DEFAULT_PORT;
+  const portNum = Number(port);
+  if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) throw new Error('Invalid Copilot API port');
+  const proxyEnabled = data.proxyEnabled !== false;
+  const proxyUrl = String(data.proxyUrl || proxyDefaults.proxyUrl || '').trim();
+  const noProxy = String(data.noProxy || proxyDefaults.noProxy || 'localhost,127.0.0.1,::1').trim();
+  if (proxyEnabled && proxyUrl) new URL(proxyUrl);
+  return { projectDir, pythonPath, port: String(portNum), proxyEnabled, proxyUrl, noProxy };
+}
+
+function copilotApiEnv(config) {
+  const env = {
+    PORT: config.port,
+    PYTHONIOENCODING: 'utf-8',
+  };
+  if (config.proxyEnabled && config.proxyUrl) {
+    for (const key of COPILOT_PROXY_ENV_KEYS) env[key] = config.proxyUrl;
+    env.NO_PROXY = config.noProxy || 'localhost,127.0.0.1,::1';
+  }
+  return env;
+}
+
+function redactProxyUrl(proxyUrl) {
+  if (!proxyUrl) return '';
+  try {
+    const u = new URL(proxyUrl);
+    if (u.username || u.password) {
+      u.username = u.username ? '***' : '';
+      u.password = u.password ? '***' : '';
+    }
+    return u.toString();
+  } catch (e) {
+    return proxyUrl;
+  }
+}
+
+function psQuote(value) {
+  return "'" + String(value).replace(/'/g, "''") + "'";
+}
+
+function buildCopilotPowerShellCommand(config) {
+  const env = copilotApiEnv(config);
+  const lines = [
+    'cd ' + psQuote(config.projectDir),
+    "$env:PORT=" + psQuote(env.PORT),
+  ];
+  for (const key of COPILOT_PROXY_ENV_KEYS) {
+    if (env[key]) lines.push(`$env:${key}=` + psQuote(env[key]));
+  }
+  if (env.NO_PROXY) lines.push("$env:NO_PROXY=" + psQuote(env.NO_PROXY));
+  lines.push("$env:PYTHONIOENCODING='utf-8'");
+  lines.push('& ' + psQuote(config.pythonPath) + " 'app.py'");
+  return lines.join('\n');
+}
+
+function localProxyListening(proxyUrl) {
+  try {
+    const u = new URL(proxyUrl);
+    const host = (u.hostname || '').toLowerCase();
+    const localHosts = ['127.0.0.1', 'localhost', '::1', '[::1]'];
+    const port = Number(u.port || (u.protocol === 'https:' ? 443 : 80));
+    if (!localHosts.includes(host) || !port) return null;
+    return isPortListening(port);
+  } catch (e) {
+    return null;
+  }
+}
+
+function appendManagedCopilotLog(kind, chunk) {
+  const text = `[${new Date().toISOString()}] ${kind}: ` + chunk.toString();
+  managedCopilotApi.log += text;
+  if (Buffer.byteLength(managedCopilotApi.log, 'utf-8') > 32 * 1024) {
+    managedCopilotApi.log = managedCopilotApi.log.slice(-24 * 1024);
+  }
+}
+
+function managedCopilotRunning() {
+  const child = managedCopilotApi.child;
+  return !!child && child.exitCode === null && !child.killed;
+}
+
+function processInfo(pid) {
+  const n = Number(pid);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  try {
+    if (IS_WIN) {
+      const script = `Get-CimInstance Win32_Process -Filter "ProcessId=${n}" | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress`;
+      const out = execFileSync('powershell.exe', ['-NoProfile', '-Command', script], {
+        encoding: 'utf-8',
+        timeout: 4000,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }).trim();
+      return out ? JSON.parse(out) : null;
+    }
+    const cmd = execSync(`ps -p ${n} -o pid=,ppid=,comm=,args=`, { encoding: 'utf-8', timeout: 3000 }).trim();
+    if (!cmd) return null;
+    const m = cmd.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+([\s\S]*)$/);
+    return m ? { ProcessId: Number(m[1]), ParentProcessId: Number(m[2]), Name: m[3], ExecutablePath: '', CommandLine: m[4] } : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function listeningPortOwners(port) {
+  const portNum = Number(port);
+  if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) return [];
+  try {
+    if (IS_WIN) {
+      const out = execSync('netstat -ano 2>nul', { encoding: 'utf-8', timeout: 3000, windowsHide: true });
+      const pids = new Set();
+      for (const line of out.split(/\r?\n/)) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length < 5 || parts[0].toUpperCase() !== 'TCP') continue;
+        const local = parts[1] || '';
+        const state = parts[3] || '';
+        const pid = Number(parts[4]);
+        if (state.toUpperCase() === 'LISTENING' && local.endsWith(':' + portNum) && Number.isInteger(pid)) pids.add(pid);
+      }
+      return Array.from(pids).map(pid => processInfo(pid)).filter(Boolean);
+    }
+    const out = execSync(`lsof -nP -iTCP:${portNum} -sTCP:LISTEN 2>/dev/null`, { encoding: 'utf-8', timeout: 3000 });
+    const lines = out.split(/\r?\n/).slice(1).filter(Boolean);
+    const pids = new Set(lines.map(line => Number(line.trim().split(/\s+/)[1])).filter(Number.isInteger));
+    return Array.from(pids).map(pid => processInfo(pid)).filter(Boolean);
+  } catch (e) {
+    return [];
+  }
+}
+
+function comparablePath(value) {
+  return String(value || '').replace(/\//g, '\\').replace(/\\+$/g, '').toLowerCase();
+}
+
+function copilotPortOwnerSummary(owner, config) {
+  if (!owner) return null;
+  const pid = owner.ProcessId || owner.processId || owner.pid;
+  const name = owner.Name || owner.name || '';
+  const executablePath = owner.ExecutablePath || owner.executablePath || '';
+  const commandLine = owner.CommandLine || owner.commandLine || '';
+  const cmd = comparablePath(commandLine);
+  const project = comparablePath(config.projectDir);
+  const safeToStop = !!pid && !!project && cmd.includes(project) && /\bapp\.py\b/i.test(commandLine) && /python/i.test(name + ' ' + executablePath + ' ' + commandLine);
+  return {
+    pid,
+    parentPid: owner.ParentProcessId || owner.parentProcessId || null,
+    name,
+    executablePath,
+    commandLine,
+    safeToStop,
+    reason: safeToStop ? 'matched Windows-Copilot-API app.py under selected project directory' : 'process does not safely match selected app.py',
+  };
+}
+
+function copilotPortOwners(config) {
+  return listeningPortOwners(config.port).map(owner => copilotPortOwnerSummary(owner, config)).filter(Boolean);
+}
+
+function getCopilotApiLauncherStatus(data) {
+  const config = normalizeCopilotApiConfig(data || {});
+  const envPresent = {};
+  const portOwners = copilotPortOwners(config);
+  for (const key of [...COPILOT_PROXY_ENV_KEYS, 'NO_PROXY']) envPresent[key] = !!process.env[key];
+  return {
+    defaults: config,
+    projectExists: fs.existsSync(config.projectDir),
+    appExists: fs.existsSync(path.join(config.projectDir, 'app.py')),
+    pythonExists: fs.existsSync(config.pythonPath),
+    targetPortListening: portOwners.length > 0 || isPortListening(config.port),
+    portOwners,
+    proxyPortListening: config.proxyEnabled ? localProxyListening(config.proxyUrl) : null,
+    proxyEnvPresent: envPresent,
+    managed: {
+      running: managedCopilotRunning(),
+      pid: managedCopilotRunning() ? managedCopilotApi.pid : null,
+      startedAt: managedCopilotApi.startedAt,
+      stoppedAt: managedCopilotApi.stoppedAt,
+      exitCode: managedCopilotApi.exitCode,
+      projectDir: managedCopilotApi.projectDir,
+      pythonPath: managedCopilotApi.pythonPath,
+      port: managedCopilotApi.port,
+      proxyUrl: redactProxyUrl(managedCopilotApi.proxyUrl),
+      noProxy: managedCopilotApi.noProxy,
+      log: managedCopilotApi.log.slice(-8000),
+    },
+    powerShellCommand: buildCopilotPowerShellCommand(config),
+  };
+}
+
+function directoryPickerRoots() {
+  const candidates = [
+    COPILOT_API_DEFAULT_DIR,
+    path.dirname(COPILOT_API_DEFAULT_DIR),
+    HOME,
+    __dirname,
+  ];
+  if (IS_WIN) {
+    for (let code = 65; code <= 90; code++) candidates.push(String.fromCharCode(code) + ':\\');
+  } else {
+    candidates.push('/');
+  }
+  const seen = new Set();
+  return candidates
+    .map(p => {
+      try { return path.resolve(p); } catch (e) { return ''; }
+    })
+    .filter(p => {
+      if (!p || seen.has(p)) return false;
+      seen.add(p);
+      try { return fs.existsSync(p) && fs.statSync(p).isDirectory(); }
+      catch (e) { return false; }
+    });
+}
+
+function listDirectoryForPicker(dir) {
+  const roots = directoryPickerRoots();
+  const fallback = roots.includes(path.resolve(COPILOT_API_DEFAULT_DIR))
+    ? path.resolve(COPILOT_API_DEFAULT_DIR)
+    : (roots[0] || __dirname);
+  const target = path.resolve(String(dir || '').trim() || fallback);
+  let stat;
+  try { stat = fs.statSync(target); }
+  catch (e) { throw new Error('Directory not found: ' + target); }
+  if (!stat.isDirectory()) throw new Error('Path is not a directory: ' + target);
+
+  const entries = [];
+  try {
+    for (const ent of fs.readdirSync(target, { withFileTypes: true })) {
+      if (!ent.isDirectory()) continue;
+      const full = path.join(target, ent.name);
+      entries.push({
+        name: ent.name,
+        path: full,
+        hasApp: fs.existsSync(path.join(full, 'app.py')),
+        hasPython: fs.existsSync(defaultCopilotPython(full)),
+      });
+      if (entries.length >= 400) break;
+    }
+  } catch (e) {
+    throw new Error('Unable to read directory: ' + e.message);
+  }
+  entries.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+  return {
+    current: target,
+    parent: path.dirname(target) !== target ? path.dirname(target) : '',
+    roots,
+    entries,
+    selectedHasApp: fs.existsSync(path.join(target, 'app.py')),
+    selectedHasPython: fs.existsSync(defaultCopilotPython(target)),
+    defaultPython: defaultCopilotPython(target),
+    proxyDefaults: copilotProxyDefaults(),
+  };
+}
+
+function startCopilotApi(data) {
+  const config = normalizeCopilotApiConfig(data || {});
+  if (managedCopilotRunning()) {
+    const err = new Error('Windows-Copilot-API is already managed by RelayManager');
+    err.code = 'ALREADY_RUNNING';
+    throw err;
+  }
+  if (!fs.existsSync(config.projectDir)) throw new Error('Windows-Copilot-API directory not found: ' + config.projectDir);
+  if (!fs.existsSync(path.join(config.projectDir, 'app.py'))) throw new Error('app.py not found in: ' + config.projectDir);
+  if (!fs.existsSync(config.pythonPath)) throw new Error('Python interpreter not found: ' + config.pythonPath);
+  if (isPortListening(config.port)) {
+    const err = new Error('Port ' + config.port + ' is already listening. Stop the existing app.py process or choose another port.');
+    err.code = 'PORT_BUSY';
+    throw err;
+  }
+  const child = spawn(config.pythonPath, ['app.py'], {
+    cwd: config.projectDir,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+    env: { ...process.env, ...copilotApiEnv(config) },
+  });
+  managedCopilotApi = {
+    child,
+    pid: child.pid,
+    startedAt: new Date().toISOString(),
+    stoppedAt: '',
+    exitCode: null,
+    projectDir: config.projectDir,
+    pythonPath: config.pythonPath,
+    port: config.port,
+    proxyUrl: config.proxyUrl,
+    noProxy: config.noProxy,
+    log: '',
+  };
+  child.stdout.on('data', c => appendManagedCopilotLog('stdout', c));
+  child.stderr.on('data', c => appendManagedCopilotLog('stderr', c));
+  child.on('error', e => appendManagedCopilotLog('error', e.message));
+  child.on('close', code => {
+    managedCopilotApi.exitCode = code;
+    managedCopilotApi.stoppedAt = new Date().toISOString();
+    if (managedCopilotApi.child === child) managedCopilotApi.child = null;
+  });
+  return getCopilotApiLauncherStatus(config);
+}
+
+function stopManagedCopilotApi() {
+  if (!managedCopilotRunning()) return getCopilotApiLauncherStatus({});
+  const cleanupConfig = normalizeCopilotApiConfig({
+    projectDir: managedCopilotApi.projectDir || COPILOT_API_DEFAULT_DIR,
+    pythonPath: managedCopilotApi.pythonPath || '',
+    port: managedCopilotApi.port || COPILOT_API_DEFAULT_PORT,
+    proxyUrl: managedCopilotApi.proxyUrl || '',
+    noProxy: managedCopilotApi.noProxy || '',
+  });
+  const pid = managedCopilotApi.pid;
+  try {
+    if (IS_WIN) execSync(`taskkill /PID ${Number(pid)} /T /F`, { timeout: 5000, windowsHide: true });
+    else managedCopilotApi.child.kill('SIGTERM');
+  } catch (e) {
+    try { managedCopilotApi.child.kill(); } catch (ignore) {}
+  }
+  managedCopilotApi.stoppedAt = new Date().toISOString();
+  for (const owner of copilotPortOwners(cleanupConfig)) {
+    if (owner.safeToStop) {
+      try {
+        if (IS_WIN) execSync(`taskkill /PID ${Number(owner.pid)} /T /F`, { timeout: 5000, windowsHide: true });
+        else process.kill(Number(owner.pid), 'SIGTERM');
+        appendManagedCopilotLog('info', `stopped listening child PID ${owner.pid}\n`);
+      } catch (e) {
+        appendManagedCopilotLog('error', `failed to stop listening child PID ${owner.pid}: ${e.message}\n`);
+      }
+    }
+  }
+  return getCopilotApiLauncherStatus(cleanupConfig);
+}
+
+function stopCopilotPortOwner(data) {
+  const config = normalizeCopilotApiConfig(data || {});
+  const confirmation = String((data && data.confirmation) || '').trim();
+  if (!['是', '确认', '继续'].includes(confirmation)) {
+    const err = new Error('Stopping the process that owns this port requires confirmation.');
+    err.code = 'CONFIRMATION_REQUIRED';
+    throw err;
+  }
+  const owners = copilotPortOwners(config);
+  const safeOwners = owners.filter(owner => owner.safeToStop);
+  if (!safeOwners.length) {
+    const err = new Error('No safely stoppable Windows-Copilot-API app.py process is listening on port ' + config.port + '.');
+    err.code = 'NO_SAFE_OWNER';
+    throw err;
+  }
+  for (const owner of safeOwners) {
+    if (IS_WIN) execSync(`taskkill /PID ${Number(owner.pid)} /T /F`, { timeout: 5000, windowsHide: true });
+    else process.kill(Number(owner.pid), 'SIGTERM');
+  }
+  return getCopilotApiLauncherStatus(config);
+}
+
+function copilotCodexConfig(overrides) {
+  overrides = overrides || {};
+  return {
+    baseUrl: overrides.baseUrl || COPILOT_DEFAULT_BASE_URL,
+    apiKey: overrides.apiKey || COPILOT_DEFAULT_API_KEY,
+    model: overrides.model || COPILOT_DEFAULT_MODEL,
+    modelProvider: 'windows-copilot',
+    providerName: 'Windows Copilot API',
+    wireApi: 'chat',
+    requiresOpenaiAuth: false,
+    reasoningEffort: 'medium',
+    reasoningSummary: 'none',
+    verbosity: '',
+    disableResponseStorage: true,
+    httpHeaders: {},
+    requestMaxRetries: '1',
+    streamMaxRetries: '0',
+    streamIdleTimeoutMs: '300000',
+  };
+}
+
+async function getAgentBridgeStatus() {
+  const copilot = await probeCopilotAPI(COPILOT_DEFAULT_BASE_URL, COPILOT_DEFAULT_API_KEY);
+  return {
+    workspace: __dirname,
+    bridgeDir: AGENT_BRIDGE_DIR,
+    handoffFiles: bridgeFileSummaries(),
+    codexpro: getCodexProStatus(),
+    copilot,
+    copilotApi: getCopilotApiLauncherStatus({}),
+    git: getGitSummary(),
+    commands: bridgeCommands(),
+  };
+}
+
+function runCommandCapture(command, args, opts) {
+  opts = opts || {};
+  const timeoutMs = opts.timeoutMs || 60000;
+  const maxBytes = opts.maxBytes || AGENT_BRIDGE_MAX_TEXT_BYTES;
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
+      cwd: opts.cwd || __dirname,
+      shell: IS_WIN,
+      windowsHide: true,
+      env: { ...process.env, ...(opts.env || {}) },
+    });
+    let stdout = '';
+    let stderr = '';
+    let killed = false;
+    const append = (kind, chunk) => {
+      const s = chunk.toString();
+      if (kind === 'stdout') stdout += s;
+      else stderr += s;
+      if (Buffer.byteLength(stdout + stderr, 'utf-8') > maxBytes) {
+        killed = true;
+        try { child.kill(); } catch (e) {}
+      }
+    };
+    child.stdout.on('data', c => append('stdout', c));
+    child.stderr.on('data', c => append('stderr', c));
+    const timer = setTimeout(() => {
+      killed = true;
+      try { child.kill(); } catch (e) {}
+    }, timeoutMs);
+    child.on('error', e => {
+      clearTimeout(timer);
+      resolve({ success: false, code: null, stdout, stderr: stderr + (stderr ? '\n' : '') + e.message, timedOut: false, truncated: killed });
+    });
+    child.on('close', code => {
+      clearTimeout(timer);
+      resolve({ success: code === 0 && !killed, code, stdout, stderr, timedOut: killed, truncated: killed });
+    });
+  });
+}
+
+async function runCodexProBridgeCommand(data) {
+  const command = data.command;
+  if (command === 'doctor') {
+    return await runCommandCapture('codexpro', ['doctor'], { timeoutMs: 45000 });
+  }
+  if (command === 'execute-handoff') {
+    const dryRun = data.dryRun !== false;
+    const confirmation = String(data.confirmation || '').trim();
+    if (!dryRun && !['是', '确认', '继续'].includes(confirmation)) {
+      const err = new Error('Executing handoff may edit files. Confirmation required.');
+      err.code = 'CONFIRMATION_REQUIRED';
+      throw err;
+    }
+    const agent = ['codex', 'opencode', 'pi'].includes(data.agent) ? data.agent : 'codex';
+    const args = ['execute-handoff', '--agent', agent];
+    if (data.model && /^[A-Za-z0-9._:-]+$/.test(String(data.model))) args.push('--model', String(data.model));
+    if (dryRun) args.push('--dry-run');
+    else args.push('--yes');
+    return await runCommandCapture('codexpro', args, { timeoutMs: dryRun ? 90000 : 600000 });
+  }
+  const err = new Error('Unsupported CodexPro command');
+  err.code = 'UNSUPPORTED_COMMAND';
+  throw err;
 }
 
 // ========== READ FUNCTIONS ==========
@@ -801,7 +1557,7 @@ function sanitizeCodexConfig(d) {
     model: str(d.model || 'gpt-5.5'),
     modelProvider: str(d.modelProvider || 'custom') || 'custom',
     providerName: str(d.providerName || 'My Codex'),
-    wireApi: ['responses', 'chat'].includes(d.wireApi) ? d.wireApi : 'responses',
+    wireApi: 'responses',
     requiresOpenaiAuth: d.requiresOpenaiAuth !== false,
     reasoningEffort: ['low', 'medium', 'high', 'xhigh'].includes(d.reasoningEffort) ? d.reasoningEffort : 'high',
     reasoningSummary: ['auto', 'concise', 'detailed', 'none'].includes(d.reasoningSummary) ? d.reasoningSummary : 'auto',
@@ -814,15 +1570,67 @@ function sanitizeCodexConfig(d) {
   };
 }
 
+function assertCodexCliConfigSupported(config) {
+  const wireApi = String((config && config.wireApi) || '').trim();
+  if (wireApi === 'chat') {
+    throw new Error('Codex CLI 已不再支持 wire_api = "chat"。请使用 responses provider；Windows Copilot API 的 chat/completions 不能直接写入 Codex CLI config.toml。');
+  }
+}
+
+function comparableCodexConfig(config) {
+  const clean = sanitizeCodexConfig(config);
+  return JSON.stringify({
+    baseUrl: clean.baseUrl,
+    model: clean.model,
+    modelProvider: clean.modelProvider,
+    providerName: clean.providerName,
+    wireApi: clean.wireApi,
+    requiresOpenaiAuth: clean.requiresOpenaiAuth,
+    reasoningEffort: clean.reasoningEffort,
+    reasoningSummary: clean.reasoningSummary,
+    verbosity: clean.verbosity,
+    disableResponseStorage: clean.disableResponseStorage,
+    httpHeaders: clean.httpHeaders,
+    requestMaxRetries: clean.requestMaxRetries,
+    streamMaxRetries: clean.streamMaxRetries,
+    streamIdleTimeoutMs: clean.streamIdleTimeoutMs,
+  });
+}
+
+function publicCodexConfigSummary(config) {
+  const clean = sanitizeCodexConfig(config);
+  return {
+    baseUrl: clean.baseUrl,
+    model: clean.model,
+    modelProvider: clean.modelProvider,
+    providerName: clean.providerName,
+    wireApi: clean.wireApi,
+    reasoningEffort: clean.reasoningEffort,
+  };
+}
+
 function listCodexConfigs() {
   const store = readCodexStore();
+  const effective = readCodexCli();
+  const applied = store.entries.find(e => e.id === store.appliedId);
+  const appliedMatchesEffective = !!applied && comparableCodexConfig(applied.config) === comparableCodexConfig(effective);
   const configs = store.entries.map(e => ({
     id: e.id,
     name: e.name || '(未命名)',
     baseUrl: (e.config && e.config.baseUrl) || '',
+    modelProvider: (e.config && e.config.modelProvider) || '',
+    wireApi: (e.config && e.config.wireApi) || '',
+    unsupported: !!(e.config && e.config.wireApi === 'chat'),
+    unsupportedReason: e.config && e.config.wireApi === 'chat' ? 'Codex CLI no longer supports wire_api=chat' : '',
     applied: e.id === store.appliedId,
   }));
-  return { appliedId: store.appliedId || '', configs };
+  return {
+    appliedId: store.appliedId || '',
+    appliedName: applied ? (applied.name || '(未命名)') : '',
+    appliedMatchesEffective,
+    effective: publicCodexConfigSummary(effective),
+    configs,
+  };
 }
 
 async function createCodexConfig(name, configData) {
@@ -838,10 +1646,54 @@ async function applyCodexConfig(id) {
   const store = readCodexStore();
   const e = store.entries.find(x => x.id === id);
   if (!e) throw new Error('配置不存在: ' + id);
+  assertCodexCliConfigSupported(e.config || {});
   store.appliedId = id;
   await writeCodexStore(store);
   await writeCodexCli(e.config || {});
   return id;
+}
+
+async function saveAndApplyCodexConfig(configData, nameHint) {
+  const store = readCodexStore();
+  const config = sanitizeCodexConfig(configData);
+  const requestedId = String((configData && configData.configId) || '').trim();
+  let entry = requestedId ? store.entries.find(x => x.id === requestedId) : null;
+  if (!entry && store.appliedId) entry = store.entries.find(x => x.id === store.appliedId);
+  if (!entry) entry = store.entries.find(x => comparableCodexConfig(x.config) === comparableCodexConfig(config));
+  if (!entry) {
+    entry = {
+      id: require('crypto').randomUUID(),
+      name: nameHint || config.baseUrl || config.providerName || '当前 Codex CLI 配置',
+      config,
+    };
+    store.entries.push(entry);
+  } else {
+    entry.config = config;
+    if (nameHint && (!entry.name || entry.name === '(未命名)')) entry.name = nameHint;
+  }
+  store.appliedId = entry.id;
+  await writeCodexStore(store);
+  await writeCodexCli(config);
+  return entry.id;
+}
+
+async function upsertAndApplyCodexConfigByName(name, configData) {
+  const store = readCodexStore();
+  const config = sanitizeCodexConfig(configData);
+  const targetName = (name || config.baseUrl || config.providerName || 'Codex CLI 配置').trim();
+  let entry = store.entries.find(x => (x.name || '').trim() === targetName);
+  if (!entry) entry = store.entries.find(x => comparableCodexConfig(x.config) === comparableCodexConfig(config));
+  if (!entry) {
+    entry = { id: require('crypto').randomUUID(), name: targetName, config };
+    store.entries.push(entry);
+  } else {
+    entry.name = targetName;
+    entry.config = config;
+  }
+  store.appliedId = entry.id;
+  await writeCodexStore(store);
+  await writeCodexCli(config);
+  return entry.id;
 }
 
 async function updateCodexConfig(id, configData) {
@@ -908,12 +1760,39 @@ function sanitizeCXDConfig(d) {
   };
 }
 
+function primaryCXDResponsesUpstream(config) {
+  const upstreams = Array.isArray(config && config.responsesUpstream) ? config.responsesUpstream : [];
+  const active = upstreams
+    .filter(u => u && u.status === 'active')
+    .sort((a, b) => (a.priority || 99) - (b.priority || 99));
+  return active[0] || upstreams[0] || null;
+}
+
+function cxdConfigDisplayBaseUrl(config) {
+  const up = primaryCXDResponsesUpstream(config || {});
+  return (up && up.baseUrl) || (config && config.injectedBaseUrl) || '';
+}
+
+function mergeCXDConfigPatch(baseConfig, patchData) {
+  const base = sanitizeCXDConfig(baseConfig || {});
+  const patch = patchData || {};
+  return sanitizeCXDConfig({
+    injectedBaseUrl: patch.injectedBaseUrl !== undefined ? patch.injectedBaseUrl : base.injectedBaseUrl,
+    injectedApiKey: patch.injectedApiKey !== undefined ? patch.injectedApiKey : base.injectedApiKey,
+    responsesUpstream: patch.responsesUpstream !== undefined ? patch.responsesUpstream : base.responsesUpstream,
+    chatUpstream: patch.chatUpstream !== undefined ? patch.chatUpstream : base.chatUpstream,
+    circuitBreaker: patch.circuitBreaker !== undefined ? patch.circuitBreaker : base.circuitBreaker,
+    fuzzyModeEnabled: patch.fuzzyModeEnabled !== undefined ? patch.fuzzyModeEnabled : base.fuzzyModeEnabled,
+  });
+}
+
 function listCXDConfigs() {
   const store = readCXDStore();
   const configs = store.entries.map(e => ({
     id: e.id,
     name: e.name || '(未命名)',
     injectedBaseUrl: (e.config && e.config.injectedBaseUrl) || '',
+    baseUrl: cxdConfigDisplayBaseUrl(e.config || {}),
     applied: e.id === store.appliedId,
   }));
   return { appliedId: store.appliedId || '', configs };
@@ -950,6 +1829,29 @@ async function updateCXDConfig(id, configData) {
   return id;
 }
 
+async function saveAndApplyCXDConfig(configData, nameHint) {
+  const store = readCXDStore();
+  const config = mergeCXDConfigPatch(readCodexDesktop(), configData);
+  const requestedId = String((configData && configData.configId) || '').trim();
+  let entry = requestedId ? store.entries.find(x => x.id === requestedId) : null;
+  if (!entry && store.appliedId) entry = store.entries.find(x => x.id === store.appliedId);
+  if (!entry) {
+    entry = {
+      id: require('crypto').randomUUID(),
+      name: nameHint || cxdConfigDisplayBaseUrl(config) || '当前 Codex Desktop 配置',
+      config,
+    };
+    store.entries.push(entry);
+  } else {
+    entry.config = config;
+    if (nameHint && (!entry.name || entry.name === '(未命名)')) entry.name = nameHint;
+  }
+  store.appliedId = entry.id;
+  await writeCXDStore(store);
+  await writeCodexDesktop(config);
+  return entry.id;
+}
+
 async function deleteCXDConfig(id) {
   const store = readCXDStore();
   store.entries = store.entries.filter(e => e.id !== id);
@@ -976,6 +1878,7 @@ function exportCXDConfig(id, stripKey) {
 
 async function writeCodexCli(data) {
   const filePath = PATHS.codexCli;
+  assertCodexCliConfigSupported(data || {});
 
   // Parse the existing TOML into an object, modify it, then re-stringify. This is
   // far more robust than the old regex approach, which corrupted files containing
@@ -999,6 +1902,10 @@ async function writeCodexCli(data) {
   // 用实际的 model_provider 值作为表键，与 readCodexCli 保持对称；默认回退 'custom'。
   const providerKey = (data.modelProvider || 'custom').trim() || 'custom';
   if (!obj.model_providers || typeof obj.model_providers !== 'object') obj.model_providers = {};
+  for (const key of Object.keys(obj.model_providers)) {
+    const provider = obj.model_providers[key];
+    if (provider && provider.wire_api === 'chat') delete obj.model_providers[key];
+  }
   if (!obj.model_providers[providerKey] || typeof obj.model_providers[providerKey] !== 'object') obj.model_providers[providerKey] = {};
   const custom = obj.model_providers[providerKey];
 
@@ -2169,11 +3076,11 @@ const server = http.createServer(async (req, res) => {
         backups.push('claude-desktop-config.json');
       }
       if (data.codexCli) {
-        await writeCodexCli(data.codexCli);
+        await saveAndApplyCodexConfig(data.codexCli);
         backups.push('codex-cli-config.toml');
       }
       if (data.codexDesktop) {
-        await writeCodexDesktop(data.codexDesktop);
+        await saveAndApplyCXDConfig(data.codexDesktop);
         backups.push('codex-desktop');
       }
       if (data.proxy) {
@@ -2289,6 +3196,155 @@ const server = http.createServer(async (req, res) => {
       const r = json(result);
       res.writeHead(r.code, { 'Content-Type': r.type });
       res.end(r.body);
+      return;
+    }
+
+    // GET /api/test-openai-chat?baseUrl=...&apiKey=...&model=... — OpenAI chat/completions probe
+    if (method === 'GET' && url.pathname === '/api/test-openai-chat') {
+      const baseUrl = url.searchParams.get('baseUrl') || COPILOT_DEFAULT_BASE_URL;
+      const apiKey = url.searchParams.get('apiKey') || COPILOT_DEFAULT_API_KEY;
+      const model = url.searchParams.get('model') || COPILOT_DEFAULT_MODEL;
+      const t0 = Date.now();
+      const result = await testOpenAIChatAPI(baseUrl, apiKey, model, { maxTokens: 64 });
+      result.duration_ms = Date.now() - t0;
+      const r = json(result);
+      res.writeHead(r.code, { 'Content-Type': r.type });
+      res.end(r.body);
+      return;
+    }
+
+    // GET /api/agent-bridge/status — CodexPro + Copilot + handoff dashboard state
+    if (method === 'GET' && url.pathname === '/api/agent-bridge/status') {
+      const r = json(await getAgentBridgeStatus());
+      res.writeHead(r.code, { 'Content-Type': r.type });
+      res.end(r.body);
+      return;
+    }
+
+    // GET /api/agent-bridge/copilot-api/status — launcher defaults + managed process state
+    if (method === 'GET' && url.pathname === '/api/agent-bridge/copilot-api/status') {
+      const r = json(getCopilotApiLauncherStatus({}));
+      res.writeHead(r.code, { 'Content-Type': r.type });
+      res.end(r.body);
+      return;
+    }
+
+    // GET /api/agent-bridge/path-picker?dir=... — list local folders for the Copilot API project picker
+    if (method === 'GET' && url.pathname === '/api/agent-bridge/path-picker') {
+      try {
+        const r = json(listDirectoryForPicker(url.searchParams.get('dir') || ''));
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
+      } catch (e) {
+        const r = error(e.message, 400);
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
+      }
+      return;
+    }
+
+    // POST /api/agent-bridge/copilot-api/command — render a PowerShell startup command with proxy env
+    if (method === 'POST' && url.pathname === '/api/agent-bridge/copilot-api/command') {
+      try {
+        const data = JSON.parse(body || '{}');
+        const r = json(getCopilotApiLauncherStatus(data));
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
+      } catch (e) {
+        const r = error(e.message, 400);
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
+      }
+      return;
+    }
+
+    // POST /api/agent-bridge/copilot-api/start — start Windows-Copilot-API with proxy env vars
+    if (method === 'POST' && url.pathname === '/api/agent-bridge/copilot-api/start') {
+      try {
+        const data = JSON.parse(body || '{}');
+        const r = json({ success: true, ...startCopilotApi(data) });
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
+      } catch (e) {
+        const code = e.code === 'PORT_BUSY' || e.code === 'ALREADY_RUNNING' ? 409 : 400;
+        const r = error(e.message, code);
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
+      }
+      return;
+    }
+
+    // POST /api/agent-bridge/copilot-api/stop — stop only the app.py process launched by RelayManager
+    if (method === 'POST' && url.pathname === '/api/agent-bridge/copilot-api/stop') {
+      const r = json({ success: true, ...stopManagedCopilotApi() });
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
+      return;
+    }
+
+    // POST /api/agent-bridge/copilot-api/stop-port-owner — stop the app.py process that owns the configured port
+    if (method === 'POST' && url.pathname === '/api/agent-bridge/copilot-api/stop-port-owner') {
+      try {
+        const data = JSON.parse(body || '{}');
+        const r = json({ success: true, ...stopCopilotPortOwner(data) });
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
+      } catch (e) {
+        const code = e.code === 'CONFIRMATION_REQUIRED' ? 400 : 409;
+        const r = error(e.message, code);
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
+      }
+      return;
+    }
+
+    // GET /api/agent-bridge/handoff/file?name=current-plan.md
+    if (method === 'GET' && url.pathname === '/api/agent-bridge/handoff/file') {
+      try {
+        const r = json(readBridgeFile(url.searchParams.get('name') || HANDOFF_FILES.plan));
+        res.writeHead(r.code, { 'Content-Type': r.type });
+        res.end(r.body);
+      } catch (e) {
+        const r = error(e.message, 400);
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
+      }
+      return;
+    }
+
+    // POST /api/agent-bridge/handoff/file — save a whitelisted .ai-bridge file
+    if (method === 'POST' && url.pathname === '/api/agent-bridge/handoff/file') {
+      const data = JSON.parse(body || '{}');
+      try {
+        const saved = await writeBridgeFile(data.name || HANDOFF_FILES.plan, data.content || '', !!data.overwrite);
+        const r = json({ success: true, file: saved });
+        res.writeHead(r.code, { 'Content-Type': r.type });
+        res.end(r.body);
+      } catch (e) {
+        const r = error(e.message, e.code === 'EEXIST' ? 409 : 400);
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
+      }
+      return;
+    }
+
+    // POST /api/agent-bridge/copilot-codex-cli — create/apply the Windows Copilot Codex CLI profile
+    if (method === 'POST' && url.pathname === '/api/agent-bridge/copilot-codex-cli') {
+      const data = JSON.parse(body || '{}');
+      const config = copilotCodexConfig({
+        baseUrl: data.baseUrl || COPILOT_DEFAULT_BASE_URL,
+        apiKey: data.apiKey || COPILOT_DEFAULT_API_KEY,
+        model: data.model || COPILOT_DEFAULT_MODEL,
+      });
+      const unsupported = '当前 Codex CLI 已不再支持 wire_api = "chat"。Windows Copilot API 只提供 chat/completions，不能直接写入 Codex CLI config.toml；请只使用启动器和 chat/completions 测试，或先增加 /v1/responses 适配层。';
+      if (data.action === 'apply') {
+        const r = error(unsupported, 400);
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+      }
+      const r = error(unsupported, 400);
+      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+    }
+
+    // POST /api/agent-bridge/codexpro/run — run whitelisted CodexPro diagnostics or handoff commands
+    if (method === 'POST' && url.pathname === '/api/agent-bridge/codexpro/run') {
+      const data = JSON.parse(body || '{}');
+      try {
+        const result = await runCodexProBridgeCommand(data);
+        const r = json({ success: result.success, ...result });
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
+      } catch (e) {
+        const r = error(e.message, e.code === 'CONFIRMATION_REQUIRED' ? 400 : 500);
+        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
+      }
       return;
     }
 
