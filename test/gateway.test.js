@@ -14,6 +14,7 @@ const ROOT = path.join(__dirname, '..');
 const GATEWAY_JSON = path.join(ROOT, 'gateway.json');
 const GATEWAY_BAK = path.join(ROOT, 'gateway.json.testbak');
 const GATEWAY_PORT = 19999;
+const MAIN_PORT = 19877;
 
 let pass = 0, fail = 0;
 function check(name, ok) { console.log((ok ? 'PASS' : 'FAIL') + ': ' + name); ok ? pass++ : fail++; }
@@ -69,7 +70,7 @@ upstream.listen(0, '127.0.0.1', () => {
     logging: false,
   }, null, 2));
 
-  const srv = spawn('node', ['server.js'], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+  const srv = spawn('node', ['server.js'], { cwd: ROOT, env: { ...process.env, PORT: String(MAIN_PORT) }, stdio: ['ignore', 'pipe', 'pipe'] });
   let started = false;
   const fin = (code) => { try { srv.kill(); } catch (e) {} upstream.close(); cleanup(); process.exit(code); };
   srv.stdout.on('data', d => {

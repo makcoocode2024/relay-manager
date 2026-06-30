@@ -7,9 +7,11 @@ paths.json
 cc-configs.json
 codex-cli-configs.json
 codex-desktop-configs.json
+codex-cli-proxy.json
 
 # 备份文件（时间戳备份，切勿提交）
 *.bak_*
+*.bak-*
 
 # 日志
 *.log
@@ -27,3 +29,4 @@ Thumbs.db
 
 # 本地 agent / 编辑器设置
 .claude/
+.ai-bridge/

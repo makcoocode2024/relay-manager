@@ -189,6 +189,12 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
 .mapping-row { display:flex; gap:8px; align-items:center; margin-bottom:8px; }
 .mapping-row input { flex:1; }
 .mapping-row span { color:var(--text2); font-size:12px; min-width:20px; text-align:center; }
+.bridge-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin-bottom:16px; }
+.bridge-box { background:var(--bg3); border:1px solid var(--border); border-radius:var(--radius); padding:12px; min-height:92px; }
+.bridge-box strong { display:block; font-size:12px; color:var(--text); margin-bottom:6px; }
+.bridge-box .meta { font-size:11px; color:var(--text2); line-height:1.5; word-break:break-word; }
+.code-box { background:#070a10; border:1px solid var(--border); border-radius:6px; padding:10px; font-family:monospace; font-size:11px; color:var(--text); white-space:pre-wrap; word-break:break-word; max-height:260px; overflow:auto; }
+.file-picker { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
 </style>
 </head>
 <body data-theme="classic">
@@ -203,6 +209,7 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
     <div class="tab" data-tab="codex-desktop">Codex Desktop</div>
     <div class="tab" data-tab="models">&#x1f4e6; 模型映射</div>
     <div class="tab" data-tab="gateway">&#x1f6e3; 中转网关</div>
+    <div class="tab" data-tab="agent-bridge">Agent 桥接</div>
   </nav>
   <div style="margin-left:auto;display:flex;align-items:center;gap:7px;">
     <span style="font-size:11px;color:var(--text2);">主题</span>
@@ -548,6 +555,7 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
         <label style="font-size:12px;color:var(--text2);white-space:nowrap;">当前配置</label>
         <select id="cx-config-select" onchange="switchCXConfig()" style="flex:1;min-width:160px;"></select>
+        <button class="btn btn-yellow btn-sm" onclick="applySelectedCXConfig()">应用所选到 config.toml</button>
         <button class="btn btn-outline btn-sm" onclick="newCXConfig()">+ 新建</button>
         <button class="btn btn-outline btn-sm" onclick="renameCXConfigUI()">&#x270e; 重命名</button>
         <button class="btn btn-red btn-sm" onclick="deleteCXConfigUI()">&#x2715; 删除</button>
@@ -555,6 +563,7 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
         <button class="btn btn-outline btn-sm" onclick="document.getElementById('cx-import-file').click()">&#x2b06; 导入</button>
         <input type="file" id="cx-import-file" accept="application/json,.json" style="display:none" onchange="importCXConfigUI(event)">
       </div>
+      <div id="cx-effective-status" style="font-size:12px;color:var(--text2);margin-top:8px;"></div>
       <p style="font-size:11px;color:var(--text2);margin:6px 0 0;">下拉切换=把所选预设写入 <code>~\.codex\config.toml</code>；新建/导入只创建预设，不主动覆盖当前生效配置。下方表单编辑的始终是「当前预设」内容。</p>
     </div>
     <div class="form-row">
@@ -587,7 +596,7 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
     <div class="form-row">
       <div class="form-group">
         <label>Wire API</label>
-        <select id="cx-wire-api"><option value="responses">responses</option><option value="chat">chat</option></select>
+        <select id="cx-wire-api"><option value="responses">responses</option></select>
       </div>
       <div class="form-group">
         <label>Reasoning Effort</label>
@@ -659,8 +668,7 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
 <!-- ============ CODEX DESKTOP TAB ============ -->
 <section class="tab-panel" id="panel-codex-desktop">
   <div class="card">
-    <h2>Codex Desktop 注入配置</h2>
-    <p style="font-size:12px;color:var(--text2);margin-bottom:16px;">修改 <code style="background:var(--bg3);padding:1px 4px;border-radius:3px;">agent-config-state\codex.json</code> + <code style="background:var(--bg3);padding:1px 4px;border-radius:3px;">.config\config.json</code></p>
+    <h2>Codex Desktop 快速配置</h2>
     <!-- 多套配置管理（对称 Claude Code） -->
     <div style="background:var(--bg3);border-radius:8px;padding:10px 12px;margin-bottom:16px;">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
@@ -673,8 +681,62 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
         <button class="btn btn-outline btn-sm" onclick="document.getElementById('cxd-import-file').click()">&#x2b06; 导入</button>
         <input type="file" id="cxd-import-file" accept="application/json,.json" style="display:none" onchange="importCXDConfigUI(event)">
       </div>
-      <p style="font-size:11px;color:var(--text2);margin:6px 0 0;">下拉切换=把所选预设同时写入 <code>config.json</code> + <code>codex.json</code>；下方表单编辑的始终是「当前预设」内容。改完记得重启 Codex Desktop。</p>
+      <p style="font-size:11px;color:var(--text2);margin:6px 0 0;">下拉切换=立即应用所选预设；下方表单=编辑当前预设的 active 上游；保存=更新当前预设并写入 <code>config.json</code> + <code>codex.json</code>。改完记得重启 Codex Desktop。</p>
     </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Base URL</label>
+        <input type="text" id="cxd-quick-url" placeholder="https://your-relay.example.com/v1">
+      </div>
+      <div class="form-group">
+        <label>API Key</label>
+        <div class="pwd-wrap">
+          <input type="password" id="cxd-quick-key" placeholder="sk-...">
+          <button class="pwd-toggle" onclick="togglePwd('cxd-quick-key',this)">&#x1f441;</button>
+        </div>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Model</label>
+        <input type="text" id="cxd-quick-model" value="gpt-5.5">
+      </div>
+    </div>
+    <details style="margin-bottom:12px;">
+      <summary style="cursor:pointer;font-size:12px;color:var(--text2);">高级选项</summary>
+      <div class="form-row" style="margin-top:12px;">
+        <div class="form-group">
+          <label>Service Type</label>
+          <select id="cxd-quick-service">
+            <option value="responses">responses</option>
+            <option value="openai">openai</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Reasoning</label>
+          <select id="cxd-quick-reasoning">
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+            <option value="xhigh" selected>xhigh</option>
+            <option value="max">max</option>
+          </select>
+        </div>
+      </div>
+    </details>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+      <button class="btn btn-outline btn-sm" onclick="testCXDQuickConnection()">&#x1f50c; 测试连接</button>
+      <button class="btn btn-primary btn-sm" onclick="saveCodexDesktopQuick(false)">&#x1f4be; 保存到当前配置</button>
+      <button class="btn btn-yellow btn-sm" onclick="saveCodexDesktopQuick(true)">保存并重启 Codex Desktop</button>
+      <span id="cxd-quick-status" style="font-size:12px;color:var(--text2);"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary style="cursor:pointer;"><span style="font-size:18px;font-weight:600;">Codex Desktop 高级配置</span></summary>
+      <div style="margin-top:16px;">
+    <p style="font-size:12px;color:var(--text2);margin-bottom:16px;">修改 <code style="background:var(--bg3);padding:1px 4px;border-radius:3px;">agent-config-state\codex.json</code> + <code style="background:var(--bg3);padding:1px 4px;border-radius:3px;">.config\config.json</code></p>
     <div class="form-row">
       <div class="form-group">
         <label>Injected Base URL</label>
@@ -689,14 +751,171 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
       </div>
     </div>
     <button class="btn btn-primary" onclick="saveCodexDesktopInjection()" style="margin-bottom:20px;">&#x1f4be; 保存注入配置</button>
+      </div>
+    </details>
   </div>
 
   <div class="card">
-    <h2>Codex Desktop 上游配置 (responsesUpstream)</h2>
+    <details>
+      <summary style="cursor:pointer;"><span style="font-size:18px;font-weight:600;">Codex Desktop 上游配置 (responsesUpstream)</span></summary>
+      <div style="margin-top:16px;">
     <p style="font-size:12px;color:var(--text2);margin-bottom:8px;">修改 <code style="background:var(--bg3);padding:1px 4px;border-radius:3px;">.config\config.json</code></p>
     <div id="responses-upstream-table"></div>
     <button class="btn btn-outline btn-sm" onclick="addUpstream('responses')" style="margin-top:8px;">+ 添加上游</button>
     <button class="btn btn-primary btn-sm" onclick="saveCodexDesktopUpstream()" style="margin-top:8px;margin-left:8px;">&#x1f4be; 保存上游配置</button>
+      </div>
+    </details>
+  </div>
+</section>
+
+<!-- ============ AGENT BRIDGE TAB ============ -->
+<section class="tab-panel" id="panel-agent-bridge">
+  <div class="card">
+    <h2>Agent 桥接总览</h2>
+    <div class="bridge-grid">
+      <div class="bridge-box">
+        <strong>CodexPro</strong>
+        <div class="meta" id="bridge-codexpro-status">加载中...</div>
+      </div>
+      <div class="bridge-box">
+        <strong>Windows Copilot API</strong>
+        <div class="meta" id="bridge-copilot-status">加载中...</div>
+      </div>
+      <div class="bridge-box">
+        <strong>Handoff</strong>
+        <div class="meta" id="bridge-handoff-status">加载中...</div>
+      </div>
+      <div class="bridge-box">
+        <strong>Git</strong>
+        <div class="meta" id="bridge-git-status">加载中...</div>
+      </div>
+    </div>
+    <button class="btn btn-outline btn-sm" onclick="loadAgentBridge()">刷新状态</button>
+  </div>
+
+  <div class="card">
+    <h2>Windows Copilot API 快捷接入</h2>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Base URL</label>
+        <input type="text" id="bridge-copilot-url" value="http://127.0.0.1:8000/v1">
+      </div>
+      <div class="form-group">
+        <label>API Key</label>
+        <input type="text" id="bridge-copilot-key" value="unused">
+      </div>
+      <div class="form-group">
+        <label>Model</label>
+        <input type="text" id="bridge-copilot-model" value="copilot">
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+      <button class="btn btn-outline btn-sm" onclick="testBridgeCopilotChat()">测试 chat/completions</button>
+      <button class="btn btn-outline btn-sm" onclick="fillCopilotToCodexCli()">查看 Codex CLI 限制</button>
+      <button class="btn btn-outline btn-sm" onclick="createCopilotCodexPreset()">创建 Codex CLI 预设</button>
+      <button class="btn btn-yellow btn-sm" onclick="applyCopilotCodexCli()">确认后写入 config.toml</button>
+      <div id="bridge-copilot-action-status" style="font-size:12px;color:var(--text2);"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Windows Copilot API 启动器</h2>
+    <div class="form-row">
+      <div class="form-group">
+        <label>项目目录</label>
+        <div style="display:flex;gap:8px;">
+          <input type="text" id="bridge-copilot-project-dir" value="G:\001\Windows-Copilot-API" onclick="maybeOpenCopilotProjectPicker()" placeholder="选择 Windows-Copilot-API 项目目录">
+          <button class="btn btn-outline btn-sm" onclick="openCopilotProjectPicker(getVal('bridge-copilot-project-dir'))">选择</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Python</label>
+        <input type="text" id="bridge-copilot-python" value="G:\001\Windows-Copilot-API\venv\Scripts\python.exe" placeholder="venv\Scripts\python.exe">
+      </div>
+      <div class="form-group" style="max-width:130px;">
+        <label>端口</label>
+        <input type="number" id="bridge-copilot-port" value="8000">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>代理地址</label>
+        <input type="text" id="bridge-copilot-proxy-url" value="http://127.0.0.1:7897" placeholder="http://127.0.0.1:7897">
+      </div>
+      <div class="form-group">
+        <label>NO_PROXY</label>
+        <input type="text" id="bridge-copilot-no-proxy" value="localhost,127.0.0.1,::1">
+      </div>
+      <div class="form-group" style="max-width:140px;">
+        <label>启用代理</label>
+        <div class="check-row" style="height:36px;align-items:center;">
+          <input type="checkbox" id="bridge-copilot-proxy-enabled" checked>
+          <label for="bridge-copilot-proxy-enabled">开启</label>
+        </div>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px;">
+      <button class="btn btn-outline btn-sm" onclick="refreshCopilotApiLauncher()">刷新启动器</button>
+      <button class="btn btn-outline btn-sm" onclick="generateCopilotApiCommand()">生成 PowerShell 命令</button>
+      <button class="btn btn-green btn-sm" onclick="startCopilotApiWithProxy()">带代理启动 API</button>
+      <button class="btn btn-outline btn-sm" onclick="stopManagedCopilotApi()">停止本页启动的 API</button>
+      <button class="btn btn-yellow btn-sm" onclick="stopCopilotApiPortOwner()">停止占用端口的 app.py</button>
+      <span id="bridge-copilot-launcher-status" style="font-size:12px;color:var(--text2);"></span>
+    </div>
+    <pre class="code-box" id="bridge-copilot-launch-command">刷新后显示启动命令。</pre>
+  </div>
+
+  <div class="card">
+    <h2>Handoff 工作区</h2>
+    <div class="form-group">
+      <label>current-plan.md</label>
+      <textarea id="bridge-plan-editor" rows="8" placeholder="把 ChatGPT / CodexPro 生成的执行计划放在这里，保存到 .ai-bridge/current-plan.md"></textarea>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
+      <button class="btn btn-primary btn-sm" onclick="saveBridgePlan(false)">保存计划</button>
+      <button class="btn btn-outline btn-sm" onclick="saveBridgePlan(true)">覆盖保存</button>
+      <button class="btn btn-outline btn-sm" onclick="loadBridgeFile('current-plan.md', true)">重新读取计划</button>
+    </div>
+    <div class="file-picker">
+      <select id="bridge-file-select" style="max-width:260px;">
+        <option value="current-plan.md">current-plan.md</option>
+        <option value="agent-status.md">agent-status.md</option>
+        <option value="implementation-diff.patch">implementation-diff.patch</option>
+        <option value="pro-context.md">pro-context.md</option>
+        <option value="execution-log.jsonl">execution-log.jsonl</option>
+      </select>
+      <button class="btn btn-outline btn-sm" onclick="loadSelectedBridgeFile()">查看文件</button>
+      <span id="bridge-file-meta" style="font-size:12px;color:var(--text2);"></span>
+    </div>
+    <pre class="code-box" id="bridge-file-content">选择文件后查看内容。</pre>
+  </div>
+
+  <div class="card">
+    <h2>CodexPro 命令</h2>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Agent</label>
+        <select id="bridge-codexpro-agent">
+          <option value="codex">codex</option>
+          <option value="opencode">opencode</option>
+          <option value="pi">pi</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Model（可选）</label>
+        <input type="text" id="bridge-codexpro-model" placeholder="留空使用 CodexPro 默认模型">
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+      <button class="btn btn-outline btn-sm" onclick="runCodexProDoctor()">运行 doctor</button>
+      <button class="btn btn-outline btn-sm" onclick="runCodexProHandoff(true)">handoff dry-run</button>
+      <button class="btn btn-red btn-sm" onclick="runCodexProHandoff(false)">确认后执行 handoff</button>
+    </div>
+    <pre class="code-box" id="bridge-command-output">命令输出会显示在这里。</pre>
+    <div style="margin-top:12px;">
+      <h3>常用命令</h3>
+      <pre class="code-box" id="bridge-command-list">加载中...</pre>
+    </div>
   </div>
 </section>
 
@@ -889,6 +1108,24 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
     <div style="padding:16px 20px;overflow-y:auto;" id="hist-list"></div>
   </div>
 </div>
+<div id="path-picker-modal" style="position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:210;display:none;align-items:center;justify-content:center;">
+  <div style="background:var(--bg2);border:1px solid var(--border);border-radius:12px;width:760px;max-width:94vw;max-height:84vh;display:flex;flex-direction:column;">
+    <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:12px;">
+      <span style="font-weight:600;">选择 Windows-Copilot-API 项目目录</span>
+      <button class="btn btn-outline btn-sm" onclick="closeCopilotProjectPicker()">关闭</button>
+    </div>
+    <div style="padding:14px 20px;border-bottom:1px solid var(--border);">
+      <div style="display:flex;gap:8px;margin-bottom:10px;">
+        <input type="text" id="path-picker-current" style="flex:1;" placeholder="当前目录">
+        <button class="btn btn-outline btn-sm" onclick="loadCopilotPathPicker(getVal('path-picker-current'))">打开</button>
+        <button class="btn btn-green btn-sm" onclick="useCopilotProjectDir(getVal('path-picker-current'))">使用此目录</button>
+      </div>
+      <div id="path-picker-roots" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
+      <div id="path-picker-meta" style="font-size:12px;color:var(--text2);margin-top:8px;"></div>
+    </div>
+    <div id="path-picker-list" style="padding:10px 20px;overflow-y:auto;min-height:260px;"></div>
+  </div>
+</div>
 <div class="toast-container" id="toasts"></div>
 
 <script>
@@ -928,6 +1165,7 @@ function switchTab(name) {
   if (name === 'codex-desktop') renderUpstreamTables();
   if (name === 'models') renderMappingForms();
   if (name === 'claude-desktop') renderCDModels();
+  if (name === 'agent-bridge') loadAgentBridge();
 }
 
 var tabButtons = document.querySelectorAll('.tab');
@@ -961,6 +1199,7 @@ function loadState() {
       loadAppPaths();
       proxyRefreshStatus();
       loadUiSettings();
+      loadAgentBridge();
     })
     .catch(function (e) {
       toast('加载配置失败: ' + e.message, 'error');
@@ -1026,6 +1265,7 @@ function populateAllForms() {
 
   // Codex Desktop
   setVal('cxd-injected-url', cxd.injectedBaseUrl); setVal('cxd-injected-key', cxd.injectedApiKey);
+  populateCXDQuick(cxd);
   loadCXDConfigs();
 
   // Sync inputs
@@ -1408,6 +1648,7 @@ async function saveMappingCXD() {
   newChat.forEach(({ u, parsed }) => { u.modelMapping = parsed; });
 
   const data = { codexDesktop: {
+    configId: getVal('cxd-config-select'),
     responsesUpstream: newResp.map(x => x.u),
     chatUpstream: newChat.map(x => x.u),
   } };
@@ -1619,6 +1860,7 @@ function collectCDModelsArray() {
 
 async function saveCodexCli() {
   const data = { codexCli: {
+    configId: getVal('cx-config-select'),
     baseUrl: getVal('cx-base-url'), apiKey: getVal('cx-api-key'),
     model: getVal('cx-model'), modelProvider: getVal('cx-model-provider'),
     providerName: getVal('cx-provider-name'), wireApi: getVal('cx-wire-api'),
@@ -1634,7 +1876,7 @@ async function saveCodexCli() {
     streamIdleTimeoutMs: getVal('cx-stream-idle'),
   }};
   await api('/api/save', 'POST', data);
-  toast('Codex CLI 配置已保存'); loadState();
+  toast('Codex CLI 配置已保存，并同步为当前生效预设'); loadState();
 }
 
 // http_headers 对象 ↔ 文本（每行 "Key: Value"）互转
@@ -1684,14 +1926,659 @@ async function testCXConnection() {
     status.innerHTML = '<span style="color:var(--red);">&#x274c; 请求失败：' + esc(e.message) + '</span>';
   }
 }
+
+// ========== AGENT BRIDGE ==========
+let agentBridgeState = null;
+
+function bridgeSetHtml(id, html) {
+  const el = document.getElementById(id);
+  if (el) el.innerHTML = html;
+}
+
+function bridgeSetText(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+
+function bridgeStatus(ok, text) {
+  return '<span style="color:' + (ok ? 'var(--green)' : 'var(--yellow)') + ';">' + (ok ? '●' : '●') + '</span> ' + esc(text);
+}
+
+function bridgeCopilotFields() {
+  return {
+    baseUrl: (getVal('bridge-copilot-url') || 'http://127.0.0.1:8000/v1').trim(),
+    apiKey: (getVal('bridge-copilot-key') || 'unused').trim() || 'unused',
+    model: (getVal('bridge-copilot-model') || 'copilot').trim() || 'copilot',
+  };
+}
+
+function bridgeCopilotLauncherFields() {
+  ensureCopilotLauncherDefaults();
+  const proxyEnabledEl = document.getElementById('bridge-copilot-proxy-enabled');
+  return {
+    projectDir: (getVal('bridge-copilot-project-dir') || '').trim(),
+    pythonPath: (getVal('bridge-copilot-python') || '').trim(),
+    port: (getVal('bridge-copilot-port') || '8000').trim(),
+    proxyUrl: (getVal('bridge-copilot-proxy-url') || '').trim(),
+    noProxy: (getVal('bridge-copilot-no-proxy') || 'localhost,127.0.0.1,::1').trim(),
+    proxyEnabled: proxyEnabledEl ? proxyEnabledEl.checked : true,
+  };
+}
+
+function defaultCopilotProjectDir() {
+  return 'G:\\001\\Windows-Copilot-API';
+}
+
+function defaultCopilotProxyUrl() {
+  return 'http://127.0.0.1:7897';
+}
+
+function copilotPythonForProject(projectDir) {
+  const dir = String(projectDir || defaultCopilotProjectDir()).replace(/[\\\/]+$/, '');
+  const sep = dir.includes('\\') ? '\\' : '/';
+  return dir + (sep === '\\' ? '\\venv\\Scripts\\python.exe' : '/venv/bin/python');
+}
+
+function ensureCopilotLauncherDefaults() {
+  const projectDir = (getVal('bridge-copilot-project-dir') || '').trim();
+  if (!getVal('bridge-copilot-python')) setVal('bridge-copilot-python', copilotPythonForProject(projectDir || defaultCopilotProjectDir()));
+  if (!getVal('bridge-copilot-port')) setVal('bridge-copilot-port', '8000');
+  if (!getVal('bridge-copilot-proxy-url')) setVal('bridge-copilot-proxy-url', defaultCopilotProxyUrl());
+  if (!getVal('bridge-copilot-no-proxy')) setVal('bridge-copilot-no-proxy', 'localhost,127.0.0.1,::1');
+}
+
+function applyCopilotApiLauncherDefaults(info) {
+  const d = (info && info.defaults) || {};
+  if (!getVal('bridge-copilot-project-dir') && d.projectDir) setVal('bridge-copilot-project-dir', d.projectDir);
+  if (!getVal('bridge-copilot-python') && d.pythonPath) setVal('bridge-copilot-python', d.pythonPath);
+  if (!getVal('bridge-copilot-port') && d.port) setVal('bridge-copilot-port', d.port);
+  if (!getVal('bridge-copilot-proxy-url') && d.proxyUrl) setVal('bridge-copilot-proxy-url', d.proxyUrl);
+  if (!getVal('bridge-copilot-no-proxy') && d.noProxy) setVal('bridge-copilot-no-proxy', d.noProxy);
+  const proxyEnabledEl = document.getElementById('bridge-copilot-proxy-enabled');
+  if (proxyEnabledEl && typeof d.proxyEnabled === 'boolean') proxyEnabledEl.checked = d.proxyEnabled;
+  ensureCopilotLauncherDefaults();
+}
+
+function maybeOpenCopilotProjectPicker() {
+  if (!(getVal('bridge-copilot-project-dir') || '').trim()) openCopilotProjectPicker('');
+}
+
+function openCopilotProjectPicker(startDir) {
+  ensureCopilotLauncherDefaults();
+  const modal = document.getElementById('path-picker-modal');
+  if (modal) modal.style.display = 'flex';
+  loadCopilotPathPicker((startDir || getVal('bridge-copilot-project-dir') || defaultCopilotProjectDir()).trim());
+}
+
+function closeCopilotProjectPicker() {
+  const modal = document.getElementById('path-picker-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+async function loadCopilotPathPicker(dir) {
+  bridgeSetText('path-picker-meta', '读取目录中...');
+  const qs = dir ? ('?dir=' + encodeURIComponent(dir)) : '';
+  try {
+    const res = await api('/api/agent-bridge/path-picker' + qs, 'GET');
+    if (res.error) {
+      bridgeSetText('path-picker-meta', res.error);
+      toast(res.error, 'error');
+      return;
+    }
+    renderCopilotPathPicker(res);
+  } catch (e) {
+    bridgeSetText('path-picker-meta', '读取失败：' + e.message);
+    toast('读取目录失败：' + e.message, 'error');
+  }
+}
+
+function renderCopilotPathPicker(info) {
+  setVal('path-picker-current', info.current || '');
+  const rootsEl = document.getElementById('path-picker-roots');
+  const listEl = document.getElementById('path-picker-list');
+  if (rootsEl) {
+    rootsEl.innerHTML = '';
+    (info.roots || []).forEach(root => {
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-outline btn-sm';
+      btn.textContent = root;
+      btn.onclick = () => loadCopilotPathPicker(root);
+      rootsEl.appendChild(btn);
+    });
+  }
+  bridgeSetText(
+    'path-picker-meta',
+    '当前目录：' + (info.current || '') +
+    ' · app.py：' + (info.selectedHasApp ? '存在' : '未找到') +
+    ' · Python：' + (info.selectedHasPython ? '存在' : '未找到')
+  );
+  if (!listEl) return;
+  listEl.innerHTML = '';
+  if (info.parent) listEl.appendChild(copilotPathRow('.. 上一级', info.parent, ''));
+  const entries = info.entries || [];
+  if (!entries.length) {
+    const empty = document.createElement('div');
+    empty.style.color = 'var(--text2)';
+    empty.style.fontSize = '12px';
+    empty.style.padding = '10px 0';
+    empty.textContent = '没有可显示的子目录。';
+    listEl.appendChild(empty);
+  }
+  entries.forEach(entry => {
+    const badge = [
+      entry.hasApp ? 'app.py' : '',
+      entry.hasPython ? 'venv python' : '',
+    ].filter(Boolean).join(' · ');
+    listEl.appendChild(copilotPathRow(entry.name, entry.path, badge));
+  });
+}
+
+function copilotPathRow(label, fullPath, badge) {
+  const row = document.createElement('div');
+  row.style.display = 'grid';
+  row.style.gridTemplateColumns = 'minmax(0,1fr) auto auto';
+  row.style.gap = '8px';
+  row.style.alignItems = 'center';
+  row.style.padding = '8px 0';
+  row.style.borderBottom = '1px solid var(--border)';
+
+  const name = document.createElement('button');
+  name.className = 'btn btn-outline btn-sm';
+  name.style.textAlign = 'left';
+  name.style.justifyContent = 'flex-start';
+  name.style.overflow = 'hidden';
+  name.style.textOverflow = 'ellipsis';
+  name.textContent = label;
+  name.title = fullPath;
+  name.onclick = () => loadCopilotPathPicker(fullPath);
+
+  const meta = document.createElement('span');
+  meta.style.fontSize = '12px';
+  meta.style.color = 'var(--text2)';
+  meta.textContent = badge || '';
+
+  const use = document.createElement('button');
+  use.className = 'btn btn-green btn-sm';
+  use.textContent = '使用';
+  use.onclick = () => useCopilotProjectDir(fullPath);
+
+  row.appendChild(name);
+  row.appendChild(meta);
+  row.appendChild(use);
+  return row;
+}
+
+function useCopilotProjectDir(projectDir) {
+  const dir = String(projectDir || '').trim();
+  if (!dir) return;
+  setVal('bridge-copilot-project-dir', dir);
+  setVal('bridge-copilot-python', copilotPythonForProject(dir));
+  if (!getVal('bridge-copilot-proxy-url')) setVal('bridge-copilot-proxy-url', defaultCopilotProxyUrl());
+  if (!getVal('bridge-copilot-no-proxy')) setVal('bridge-copilot-no-proxy', 'localhost,127.0.0.1,::1');
+  closeCopilotProjectPicker();
+  generateCopilotApiCommand();
+}
+
+function renderCopilotApiLauncher(info) {
+  if (!info) return;
+  applyCopilotApiLauncherDefaults(info);
+  const managed = info.managed || {};
+  const env = info.proxyEnvPresent || {};
+  const envOk = !!(env.HTTP_PROXY || env.HTTPS_PROXY || env.ALL_PROXY);
+  const filesOk = !!info.projectExists && !!info.appExists && !!info.pythonExists;
+  const owners = info.portOwners || [];
+  const ownerText = owners.length
+    ? owners.map(o => 'PID ' + o.pid + (o.safeToStop ? ' 可停止' : ' 不匹配')).join(', ')
+    : '无';
+  const bits = [
+    '文件：' + (filesOk ? '就绪' : '缺失'),
+    'API端口：' + (info.targetPortListening ? '监听中' : '未监听'),
+    '端口占用：' + ownerText,
+    '代理端口：' + (info.proxyPortListening === null ? '未检测' : (info.proxyPortListening ? '监听中' : '未监听')),
+    'RelayManager环境：' + (envOk ? '已有代理变量' : '无代理变量'),
+    '托管进程：' + (managed.running ? ('运行中 PID ' + managed.pid) : '未运行'),
+  ];
+  if (!managed.running && managed.exitCode !== null && managed.exitCode !== undefined) bits.push('上次退出：' + managed.exitCode);
+  bridgeSetHtml('bridge-copilot-launcher-status', bits.map(esc).join(' · '));
+  if (info.powerShellCommand) bridgeSetText('bridge-copilot-launch-command', info.powerShellCommand);
+  if (managed.log) {
+    bridgeSetText('bridge-copilot-launch-command', (info.powerShellCommand || '') + '\n\n# 最近输出\n' + managed.log);
+  }
+  if (owners.length) {
+    const ownerDetails = owners.map(o => [
+      'PID: ' + o.pid,
+      'Name: ' + (o.name || ''),
+      'SafeToStop: ' + (o.safeToStop ? 'yes' : 'no'),
+      'Command: ' + (o.commandLine || ''),
+    ].join('\n')).join('\n\n');
+    const current = document.getElementById('bridge-copilot-launch-command');
+    if (current && !current.textContent.includes('# 端口占用进程')) {
+      bridgeSetText('bridge-copilot-launch-command', current.textContent + '\n\n# 端口占用进程\n' + ownerDetails);
+    }
+  }
+}
+
+async function refreshCopilotApiLauncher() {
+  try {
+    const res = await api('/api/agent-bridge/copilot-api/status', 'GET');
+    if (res.error) { toast(res.error, 'error'); return; }
+    renderCopilotApiLauncher(res);
+  } catch (e) { toast('刷新启动器失败：' + e.message, 'error'); }
+}
+
+async function generateCopilotApiCommand() {
+  try {
+    const res = await api('/api/agent-bridge/copilot-api/command', 'POST', bridgeCopilotLauncherFields());
+    if (res.error) { toast(res.error, 'error'); return; }
+    renderCopilotApiLauncher(res);
+    toast('已生成带代理环境变量的启动命令');
+  } catch (e) { toast('生成命令失败：' + e.message, 'error'); }
+}
+
+async function startCopilotApiWithProxy() {
+  bridgeSetText('bridge-copilot-launcher-status', '正在启动...');
+  try {
+    const res = await api('/api/agent-bridge/copilot-api/start', 'POST', bridgeCopilotLauncherFields());
+    if (res.error) { bridgeSetText('bridge-copilot-launcher-status', res.error); toast(res.error, 'error'); return; }
+    renderCopilotApiLauncher(res);
+    toast('已带代理环境变量启动 Windows-Copilot-API');
+    setTimeout(loadAgentBridge, 1200);
+  } catch (e) {
+    bridgeSetText('bridge-copilot-launcher-status', '启动失败：' + e.message);
+    toast('启动失败：' + e.message, 'error');
+  }
+}
+
+async function stopManagedCopilotApi() {
+  try {
+    const res = await api('/api/agent-bridge/copilot-api/stop', 'POST', {});
+    if (res.error) { toast(res.error, 'error'); return; }
+    renderCopilotApiLauncher(res);
+    toast('已停止 RelayManager 启动的 Windows-Copilot-API');
+    setTimeout(loadAgentBridge, 800);
+  } catch (e) { toast('停止失败：' + e.message, 'error'); }
+}
+
+async function stopCopilotApiPortOwner() {
+  const fields = bridgeCopilotLauncherFields();
+  const confirmation = prompt('此操作会停止当前端口上的 Windows-Copilot-API app.py 进程。请输入“确认”继续：');
+  if (confirmation !== '确认') return;
+  bridgeSetText('bridge-copilot-launcher-status', '正在停止端口占用进程...');
+  try {
+    const res = await api('/api/agent-bridge/copilot-api/stop-port-owner', 'POST', { ...fields, confirmation });
+    if (res.error) { bridgeSetText('bridge-copilot-launcher-status', res.error); toast(res.error, 'error'); return; }
+    renderCopilotApiLauncher(res);
+    toast('已停止占用端口的 Windows-Copilot-API app.py');
+    setTimeout(loadAgentBridge, 800);
+  } catch (e) {
+    bridgeSetText('bridge-copilot-launcher-status', '停止失败：' + e.message);
+    toast('停止失败：' + e.message, 'error');
+  }
+}
+
+async function loadAgentBridge() {
+  const codexEl = document.getElementById('bridge-codexpro-status');
+  if (!codexEl) return;
+  bridgeSetText('bridge-codexpro-status', '刷新中...');
+  try {
+    const data = await api('/api/agent-bridge/status', 'GET');
+    agentBridgeState = data;
+    const cp = data.codexpro || {};
+    bridgeSetHtml('bridge-codexpro-status',
+      bridgeStatus(!!cp.installed, cp.installed ? '已检测到 codexpro' : '未检测到 codexpro') +
+      '<br>版本：' + esc(cp.version || cp.versionError || '未知') +
+      '<br>位置：' + esc(cp.location || '未找到') +
+      '<br>8787 端口：' + esc(cp.defaultPortListening ? '监听中' : '未监听'));
+
+    const copilot = data.copilot || {};
+    bridgeSetHtml('bridge-copilot-status',
+      bridgeStatus(!!copilot.reachable, copilot.reachable ? '可连接' : '未连接') +
+      '<br>地址：' + esc(copilot.baseUrl || '') +
+      '<br>模型数：' + esc((copilot.models || []).length) +
+      (copilot.error ? '<br>错误：' + esc(copilot.error) : ''));
+    renderCopilotApiLauncher(data.copilotApi);
+
+    const files = data.handoffFiles || [];
+    const existing = files.filter(f => f.exists);
+    bridgeSetHtml('bridge-handoff-status',
+      '目录：' + esc(data.bridgeDir || '') +
+      '<br>已有文件：' + existing.length + '/' + files.length +
+      '<br>' + existing.map(f => esc(f.name) + ' (' + f.size + 'B)').join('<br>'));
+
+    const git = data.git || {};
+    bridgeSetHtml('bridge-git-status',
+      bridgeStatus(!!git.available && !!git.clean, git.available ? (git.clean ? '工作区干净' : '有未提交改动') : '无法读取 git') +
+      '<br>改动数：' + esc(git.changed || 0) +
+      (git.lines && git.lines.length ? '<br>' + git.lines.slice(0, 6).map(esc).join('<br>') : '') +
+      (git.error ? '<br>错误：' + esc(git.error) : ''));
+
+    const commands = data.commands || {};
+    bridgeSetText('bridge-command-list', Object.keys(commands).map(k => k + ': ' + commands[k]).join('\n'));
+    const plan = files.find(f => f.name === 'current-plan.md');
+    if (plan && plan.exists && !getVal('bridge-plan-editor')) setVal('bridge-plan-editor', plan.preview || '');
+  } catch (e) {
+    bridgeSetText('bridge-codexpro-status', '刷新失败：' + e.message);
+  }
+}
+
+async function loadBridgeFile(name, intoEditor) {
+  try {
+    const fileName = name || getVal('bridge-file-select') || 'current-plan.md';
+    const res = await api('/api/agent-bridge/handoff/file?name=' + encodeURIComponent(fileName), 'GET');
+    if (res.error) { toast(res.error, 'error'); return; }
+    bridgeSetText('bridge-file-content', res.exists ? res.content : '文件不存在：' + res.name);
+    bridgeSetText('bridge-file-meta', res.exists ? (res.name + ' · ' + res.size + 'B · ' + res.mtime + (res.truncated ? ' · 已截断' : '')) : '文件不存在');
+    if (intoEditor) setVal('bridge-plan-editor', res.content || '');
+  } catch (e) { toast('读取 handoff 文件失败：' + e.message, 'error'); }
+}
+
+function loadSelectedBridgeFile() {
+  loadBridgeFile(getVal('bridge-file-select'), false);
+}
+
+async function saveBridgePlan(forceOverwrite) {
+  const content = getVal('bridge-plan-editor');
+  if (!content.trim()) { toast('计划内容为空', 'error'); return; }
+  const overwrite = !!forceOverwrite;
+  if (overwrite) {
+    const sure = prompt('覆盖 .ai-bridge/current-plan.md 会先备份旧文件。请输入“确认”继续：');
+    if (sure !== '确认') return;
+  }
+  try {
+    const res = await api('/api/agent-bridge/handoff/file', 'POST', { name: 'current-plan.md', content, overwrite });
+    if (res.error) {
+      if (/already exists/i.test(res.error)) toast('文件已存在，请使用“覆盖保存”或先读取现有计划', 'error');
+      else toast(res.error, 'error');
+      return;
+    }
+    toast('计划已保存到 .ai-bridge/current-plan.md');
+    bridgeSetText('bridge-file-content', res.file.content || '');
+    loadAgentBridge();
+  } catch (e) { toast('保存计划失败：' + e.message, 'error'); }
+}
+
+async function testBridgeCopilotChat() {
+  const f = bridgeCopilotFields();
+  const status = document.getElementById('bridge-copilot-action-status');
+  if (status) status.textContent = '测试中...';
+  try {
+    const params = new URLSearchParams({ baseUrl: f.baseUrl, apiKey: f.apiKey, model: f.model });
+    const res = await api('/api/test-openai-chat?' + params, 'GET');
+    if (res.success) {
+      if (status) status.innerHTML = '<span style="color:var(--green);">连接成功（HTTP ' + esc(res.status) + '）</span>';
+    } else {
+      if (status) status.innerHTML = renderBridgeCopilotFailure(res);
+    }
+  } catch (e) {
+    if (status) status.innerHTML = '<span style="color:var(--red);">请求失败：' + esc(e.message) + '</span>';
+  }
+}
+
+function bridgeCopilotFailureHint(res) {
+  if (res.status === 429 || res.errorType === 'rate_limit_error') {
+    return '建议等待 20-60 秒后只测试一次；Windows-Copilot-API 默认 RATE_LIMIT_BURST=4，连续点击会触发限流。';
+  }
+  if (res.status === 503 || res.errorType === 'clearance_required') {
+    return '建议在 Windows-Copilot-API 目录运行 python -m copilot login 或 python tests/diagnostic.py 重新刷新 Cloudflare clearance。';
+  }
+  if (res.status === 502 || res.errorType === 'upstream_error') {
+    return '请求已到达 Windows-Copilot-API，但它连接 Copilot 上游失败；可先运行 python -m copilot ask "你好，只回复 OK"，成功后重启 python app.py 再测。';
+  }
+  if (res.errorType === 'network_error') {
+    return 'RelayManager 当前连不上该地址，请确认 python app.py 正在运行，且 Base URL 端口正确。';
+  }
+  return '';
+}
+
+function renderBridgeCopilotFailure(res) {
+  const statusText = res.status ? 'HTTP ' + res.status : '网络错误';
+  const typeText = res.errorType ? ' ' + res.errorType : '';
+  const hint = bridgeCopilotFailureHint(res);
+  const detail = [
+    res.endpoint ? 'Endpoint: ' + res.endpoint : '',
+    res.errorBody ? 'Response: ' + res.errorBody : '',
+  ].filter(Boolean).join('\n');
+  let html = '<span style="color:var(--red);">失败：' + esc(statusText + typeText + '：' + (res.error || '未知错误')) + '</span>';
+  if (hint) html += '<div style="margin-top:4px;color:var(--text2);">' + esc(hint) + '</div>';
+  if (detail) {
+    html += '<details style="margin-top:4px;color:var(--text2);"><summary>查看响应详情</summary>' +
+      '<pre style="white-space:pre-wrap;margin:6px 0 0;max-width:720px;max-height:180px;overflow:auto;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:8px;">' +
+      esc(detail) + '</pre></details>';
+  }
+  return html;
+}
+
+function fillCopilotToCodexCli() {
+  toast('新版 Codex CLI 已不再支持 wire_api=chat；Windows Copilot API 不能直接写入 Codex CLI。请使用启动器测试，或先增加 /v1/responses 适配层。', 'error');
+}
+
+async function createCopilotCodexPreset() {
+  const f = bridgeCopilotFields();
+  try {
+    const res = await api('/api/agent-bridge/copilot-codex-cli', 'POST', { action: 'create', ...f, name: 'Windows Copilot API (legacy chat)' });
+    if (res.error) { toast(res.error, 'error'); return; }
+    toast('已创建 Codex CLI Copilot 预设（未覆盖 config.toml）');
+    await loadCXConfigs();
+  } catch (e) { toast('创建预设失败：' + e.message, 'error'); }
+}
+
+async function applyCopilotCodexCli() {
+  const f = bridgeCopilotFields();
+  const confirmation = prompt('新版 Codex CLI 已不再支持 wire_api=chat。此操作通常会失败，仅用于确认后查看后端错误。请输入“确认”继续：');
+  if (confirmation !== '确认') return;
+  try {
+    const res = await api('/api/agent-bridge/copilot-codex-cli', 'POST', { action: 'apply', confirmation, ...f });
+    if (res.error) { toast(res.error, 'error'); return; }
+    toast('已写入 Codex CLI Copilot 配置');
+    await loadState();
+  } catch (e) { toast('写入失败：' + e.message, 'error'); }
+}
+
+async function runCodexProDoctor() {
+  bridgeSetText('bridge-command-output', '正在运行 codexpro doctor...');
+  try {
+    const res = await api('/api/agent-bridge/codexpro/run', 'POST', { command: 'doctor' });
+    bridgeSetText('bridge-command-output', '$ codexpro doctor\n\n' + (res.stdout || '') + (res.stderr ? '\n[stderr]\n' + res.stderr : '') + '\nexit=' + res.code);
+  } catch (e) { bridgeSetText('bridge-command-output', '运行失败：' + e.message); }
+}
+
+async function runCodexProHandoff(dryRun) {
+  const agent = getVal('bridge-codexpro-agent') || 'codex';
+  const model = getVal('bridge-codexpro-model');
+  let confirmation = '';
+  if (!dryRun) {
+    confirmation = prompt('执行 handoff 可能修改工作区文件。请输入“确认”继续：');
+    if (confirmation !== '确认') return;
+  }
+  bridgeSetText('bridge-command-output', dryRun ? '正在 dry-run...' : '正在执行 handoff...');
+  try {
+    const res = await api('/api/agent-bridge/codexpro/run', 'POST', { command: 'execute-handoff', dryRun, agent, model, confirmation });
+    const cmd = 'codexpro execute-handoff --agent ' + agent + (model ? ' --model ' + model : '') + (dryRun ? ' --dry-run' : ' --yes');
+    bridgeSetText('bridge-command-output', '$ ' + cmd + '\n\n' + (res.stdout || '') + (res.stderr ? '\n[stderr]\n' + res.stderr : '') + '\nexit=' + res.code);
+    loadAgentBridge();
+  } catch (e) { bridgeSetText('bridge-command-output', '运行失败：' + e.message); }
+}
 async function saveCodexDesktopInjection() {
-  const data = { codexDesktop: { injectedBaseUrl: getVal('cxd-injected-url'), injectedApiKey: getVal('cxd-injected-key') } };
+  const data = { codexDesktop: {
+    configId: getVal('cxd-config-select'),
+    injectedBaseUrl: getVal('cxd-injected-url'),
+    injectedApiKey: getVal('cxd-injected-key'),
+  } };
   await api('/api/save', 'POST', data);
   toast('Codex Desktop 注入配置已保存'); loadState();
 }
+
+function getPrimaryCXDUpstream(cxd) {
+  const upstreams = Array.isArray(cxd?.responsesUpstream) ? cxd.responsesUpstream : [];
+  const active = upstreams
+    .filter(u => u && u.status === 'active')
+    .sort((a, b) => (a.priority || 99) - (b.priority || 99));
+  return active[0] || upstreams[0] || null;
+}
+
+function upstreamHostName(baseUrl) {
+  try {
+    const u = new URL(normalizeRelayBaseUrl(baseUrl));
+    return u.host || 'new-upstream';
+  } catch (e) {
+    return 'new-upstream';
+  }
+}
+
+function firstKey(obj, fallback) {
+  if (obj && typeof obj === 'object') {
+    const keys = Object.keys(obj);
+    if (keys.length) return keys[0];
+  }
+  return fallback;
+}
+
+function populateCXDQuick(cxd) {
+  const status = document.getElementById('cxd-quick-status');
+  if (status) status.textContent = '';
+  const up = getPrimaryCXDUpstream(cxd);
+  if (!up) {
+    if (!getVal('cxd-quick-model')) setVal('cxd-quick-model', 'gpt-5.5');
+    if (!getVal('cxd-quick-service')) setVal('cxd-quick-service', 'responses');
+    if (!getVal('cxd-quick-reasoning')) setVal('cxd-quick-reasoning', 'xhigh');
+    return;
+  }
+  const model = firstKey(up.modelMapping, 'gpt-5.5');
+  const reasoning = (up.reasoningMapping && up.reasoningMapping[model]) || 'xhigh';
+  setVal('cxd-quick-url', up.baseUrl || '');
+  setVal('cxd-quick-key', (up.apiKeys || [])[0] || '');
+  setVal('cxd-quick-model', model);
+  setVal('cxd-quick-service', up.serviceType || 'responses');
+  setVal('cxd-quick-reasoning', reasoning);
+}
+
+function collectCXDQuick() {
+  const baseUrl = normalizeRelayBaseUrl(getVal('cxd-quick-url'));
+  const apiKey = (getVal('cxd-quick-key') || '').trim();
+  const model = (getVal('cxd-quick-model') || 'gpt-5.5').trim();
+  const serviceType = getVal('cxd-quick-service') || 'responses';
+  const reasoning = getVal('cxd-quick-reasoning') || 'xhigh';
+  if (!baseUrl) throw new Error('请填写 Base URL');
+  if (!apiKey) throw new Error('请填写 API Key');
+  return { baseUrl, apiKey, model, serviceType, reasoning };
+}
+
+function findCXDUpstreamByBaseUrl(upstreams, baseUrl) {
+  return (upstreams || []).find(u => normalizeRelayBaseUrl(u.baseUrl || '') === baseUrl) || null;
+}
+
+function findPrimaryCXDUpstreamIndex(upstreams) {
+  if (!Array.isArray(upstreams) || upstreams.length === 0) return -1;
+  let bestIndex = -1;
+  let bestPriority = Infinity;
+  upstreams.forEach((u, index) => {
+    const isActive = (u && u.status) === 'active';
+    const priority = Number(u && u.priority) || 99;
+    if (isActive && priority < bestPriority) {
+      bestIndex = index;
+      bestPriority = priority;
+    }
+  });
+  return bestIndex >= 0 ? bestIndex : 0;
+}
+
+function getCXDResponsesUpstreamsFromUi() {
+  const hasTableInputs = document.querySelector('#responses-upstream-table [data-idx]');
+  if (hasTableInputs) return collectUpstreamTable();
+  return Array.isArray(currentState.codexDesktop?.responsesUpstream) ? currentState.codexDesktop.responsesUpstream : [];
+}
+
+function buildCXDQuickUpstream(q, previous) {
+  const base = (previous && typeof previous === 'object') ? previous : {};
+  const defaultPreviousName = base.baseUrl ? upstreamHostName(base.baseUrl) : '';
+  const upstreamName = (!base.name || base.name === defaultPreviousName) ? upstreamHostName(q.baseUrl) : base.name;
+  return {
+    ...base,
+    name: upstreamName,
+    baseUrl: q.baseUrl,
+    apiKeys: [q.apiKey],
+    modelMapping: { [q.model]: q.model },
+    reasoningMapping: { [q.model]: q.reasoning },
+    reasoningParamStyle: q.reasoning === 'max' ? 'thinking' : 'reasoning',
+    serviceType: q.serviceType,
+    codexToolCompat: base.codexToolCompat === true,
+    priority: 1,
+    status: 'active',
+    autoBlacklistBalance: base.autoBlacklistBalance !== false,
+    normalizeMetadataUserId: base.normalizeMetadataUserId !== false,
+    stripBillingHeader: base.stripBillingHeader === true,
+    rateLimitAutoFromHeaders: base.rateLimitAutoFromHeaders === true,
+  };
+}
+
+function buildCXDResponsesFromQuickForm(q, existingUpstreams) {
+  const existing = Array.isArray(existingUpstreams) ? existingUpstreams : [];
+  const primaryIndex = findPrimaryCXDUpstreamIndex(existing);
+  const previous = primaryIndex >= 0
+    ? existing[primaryIndex]
+    : findCXDUpstreamByBaseUrl(existing, q.baseUrl);
+  const primary = buildCXDQuickUpstream(q, previous);
+  return existing
+    .filter((u, index) => index !== primaryIndex)
+    .map((u, i) => ({ ...u, status: 'suspended', priority: i + 2 }))
+    .reduce((all, u) => (all.push(u), all), [primary]);
+}
+
+function buildCXDConfigFromQuickForm(q) {
+  const cxd = currentState.codexDesktop || {};
+  const responsesUpstream = buildCXDResponsesFromQuickForm(q, getCXDResponsesUpstreamsFromUi());
+  return {
+    configId: getVal('cxd-config-select'),
+    injectedBaseUrl: getVal('cxd-injected-url'),
+    injectedApiKey: getVal('cxd-injected-key'),
+    responsesUpstream,
+    chatUpstream: Array.isArray(cxd.chatUpstream) ? cxd.chatUpstream : [],
+    circuitBreaker: (cxd.circuitBreaker && typeof cxd.circuitBreaker === 'object') ? cxd.circuitBreaker : {},
+    fuzzyModeEnabled: cxd.fuzzyModeEnabled !== false,
+  };
+}
+
+async function testCXDQuickConnection() {
+  const status = document.getElementById('cxd-quick-status');
+  if (status) status.innerHTML = '<span class="loading"></span> 测试中...';
+  try {
+    const q = collectCXDQuick();
+    const params = new URLSearchParams({ baseUrl: q.baseUrl, apiKey: q.apiKey });
+    const res = await api('/api/models?' + params, 'GET');
+    if (res.success && res.total > 0) {
+      if (status) status.innerHTML = '<span style="color:var(--green);">连接成功，可用模型 ' + esc(res.total) + ' 个</span>';
+    } else {
+      if (status) status.innerHTML = '<span style="color:var(--red);">连接失败：' + esc(res.error || '未获取到模型列表') + '</span>';
+    }
+  } catch (e) {
+    if (status) status.innerHTML = '<span style="color:var(--red);">' + esc(e.message) + '</span>';
+  }
+}
+
+async function saveCodexDesktopQuick(shouldRestart) {
+  const status = document.getElementById('cxd-quick-status');
+  try {
+    const q = collectCXDQuick();
+    if (status) status.textContent = '保存中...';
+    const data = { codexDesktop: buildCXDConfigFromQuickForm(q) };
+    await api('/api/save', 'POST', data);
+    toast('Codex Desktop 当前配置已保存');
+    await loadState();
+    if (shouldRestart) await restartApp('codex-desktop');
+    if (status) status.innerHTML = '<span style="color:var(--green);">已保存到当前配置（active 上游）' + (shouldRestart ? '，已请求重启' : '') + '</span>';
+  } catch (e) {
+    if (status) status.innerHTML = '<span style="color:var(--red);">' + esc(e.message) + '</span>';
+    toast('保存失败：' + e.message, 'error');
+  }
+}
+
 async function saveCodexDesktopUpstream() {
   const upstreams = collectUpstreamTable();
-  const data = { codexDesktop: { responsesUpstream: upstreams, chatUpstream: currentState.codexDesktop?.chatUpstream || [] } };
+  const data = { codexDesktop: {
+    configId: getVal('cxd-config-select'),
+    responsesUpstream: upstreams,
+    chatUpstream: currentState.codexDesktop?.chatUpstream || [],
+  } };
   await api('/api/save', 'POST', data);
   toast('Codex Desktop 上游配置已保存'); loadState();
 }
@@ -2215,12 +3102,19 @@ function collectCXConfig() {
 
 // 收集 Codex Desktop 表单值为对象（注入+上游），供创建预设时使用
 function collectCXDConfig() {
+  let quick = null;
+  try { quick = collectCXDQuick(); } catch (e) {}
+  const cxd = currentState.codexDesktop || {};
+  const responsesUpstream = quick
+    ? buildCXDResponsesFromQuickForm(quick, getCXDResponsesUpstreamsFromUi())
+    : getCXDResponsesUpstreamsFromUi();
   return {
-    injectedBaseUrl: getVal('cxd-injected-url'), injectedApiKey: getVal('cxd-injected-key'),
-    responsesUpstream: Array.isArray(currentState.codexDesktop?.responsesUpstream) ? currentState.codexDesktop.responsesUpstream : [],
-    chatUpstream: Array.isArray(currentState.codexDesktop?.chatUpstream) ? currentState.codexDesktop.chatUpstream : [],
-    circuitBreaker: (currentState.codexDesktop && currentState.codexDesktop.circuitBreaker) || {},
-    fuzzyModeEnabled: currentState.codexDesktop ? currentState.codexDesktop.fuzzyModeEnabled : true,
+    injectedBaseUrl: getVal('cxd-injected-url'),
+    injectedApiKey: getVal('cxd-injected-key'),
+    responsesUpstream,
+    chatUpstream: Array.isArray(cxd.chatUpstream) ? cxd.chatUpstream : [],
+    circuitBreaker: (cxd.circuitBreaker && typeof cxd.circuitBreaker === 'object') ? cxd.circuitBreaker : {},
+    fuzzyModeEnabled: cxd.fuzzyModeEnabled !== false,
   };
 }
 
@@ -2319,6 +3213,7 @@ async function loadCXConfigs() {
   try {
     const data = await api('/api/codex-cli/config/list', 'GET');
     cxConfigList = data.configs || [];
+    renderCXEffectiveStatus(data);
     const sel = document.getElementById('cx-config-select');
     if (!sel) return;
     if (cxConfigList.length === 0) {
@@ -2326,12 +3221,32 @@ async function loadCXConfigs() {
       return;
     }
     sel.innerHTML = cxConfigList.map(c =>
-      `<option value="${esc(c.id)}" ${c.applied ? 'selected' : ''}>${esc(c.name)}${c.applied ? '（生效中）' : ''} — ${esc(c.baseUrl || '未设地址')}</option>`
+      `<option value="${esc(c.id)}" ${c.applied ? 'selected' : ''}>${esc(c.name)}${c.applied ? '（生效中）' : ''}${c.unsupported ? '（不支持 chat）' : ''} — ${esc(c.baseUrl || '未设地址')}</option>`
     ).join('');
   } catch (e) { /* 读取失败时静默 */ }
 }
 
-async function switchCXConfig() {
+function renderCXEffectiveStatus(data) {
+  const el = document.getElementById('cx-effective-status');
+  if (!el) return;
+  const eff = (data && data.effective) || {};
+  const appliedName = data && data.appliedName ? data.appliedName : '未选择预设';
+  const ok = data && data.appliedMatchesEffective;
+  const parts = [
+    'config.toml 实际生效：' + (eff.modelProvider || '未知') + ' · ' + (eff.wireApi || '') + ' · ' + (eff.baseUrl || '未设地址') + ' · model=' + (eff.model || ''),
+    '下拉生效预设：' + appliedName,
+  ];
+  if (eff.modelProvider === 'windows-copilot') {
+    parts.push('当前实际正在使用 Windows Copilot API。要切回 Codex CLI 页面配置，请选择 custom/responses 预设并点击“应用所选到 config.toml”。');
+  } else if (!ok) {
+    parts.push('预设清单与 config.toml 不一致，请点击“应用所选到 config.toml”重新同步。');
+  } else {
+    parts.push('预设与 config.toml 一致。');
+  }
+  el.innerHTML = parts.map((p, idx) => '<div style="color:' + (idx === 2 && !ok ? 'var(--yellow)' : 'var(--text2)') + ';">' + esc(p) + '</div>').join('');
+}
+
+async function applySelectedCXConfig() {
   const id = getVal('cx-config-select');
   if (!id) return;
   try {
@@ -2339,6 +3254,10 @@ async function switchCXConfig() {
     toast('已切换并写入 config.toml，新开的 Codex CLI 会话即生效；下方表单会随之加载对应配置');
     await loadState();
   } catch (e) { toast('切换失败：' + e.message, 'error'); }
+}
+
+async function switchCXConfig() {
+  await applySelectedCXConfig();
 }
 
 // 保守策略：新建只创建预设，不覆写 config.toml（与 Claude Code 版差异）
@@ -2414,7 +3333,7 @@ async function loadCXDConfigs() {
       return;
     }
     sel.innerHTML = cxdConfigList.map(c =>
-      `<option value="${esc(c.id)}" ${c.applied ? 'selected' : ''}>${esc(c.name)}${c.applied ? '（生效中）' : ''} — ${esc(c.injectedBaseUrl || '未设地址')}</option>`
+      `<option value="${esc(c.id)}" ${c.applied ? 'selected' : ''}>${esc(c.name)}${c.applied ? '（生效中）' : ''} — ${esc(c.baseUrl || c.injectedBaseUrl || '未设地址')}</option>`
     ).join('');
   } catch (e) { /* 读取失败时静默 */ }
 }
@@ -2433,9 +3352,10 @@ async function newCXDConfig() {
   const name = prompt('新配置名称：', '新中转配置');
   if (name === null) return;
   try {
-    await api('/api/codex-desktop/config/create', 'POST', { name, config: collectCXDConfig() });
-    toast('已创建预设「' + name + '」并写入 config.json + codex.json');
-    await loadCXDConfigs();
+    const res = await api('/api/codex-desktop/config/create', 'POST', { name, config: collectCXDConfig() });
+    await api('/api/codex-desktop/config/apply', 'POST', { id: res.id });
+    toast('已创建并切换到「' + name + '」，已写入 config.json + codex.json');
+    await loadState();
   } catch (e) { toast('创建失败：' + e.message, 'error'); }
 }
 
