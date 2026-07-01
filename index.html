@@ -54,7 +54,7 @@ body[data-sidebar-layout="sidebar"] header h1 { font-size:17px; margin-bottom:6p
 body[data-sidebar-layout="sidebar"] .tabs { flex-direction:column; gap:3px; flex-wrap:nowrap; }
 body[data-sidebar-layout="sidebar"] .tab { width:100%; text-align:left; padding:10px 12px; }
 body[data-sidebar-layout="sidebar"] header > div[style*="margin-left:auto"] { margin-left:0 !important; }
-body[data-sidebar-layout="sidebar"] header > div[id="proc-indicator"] { width:100%; justify-content:flex-start; }
+body[data-sidebar-layout="sidebar"] #proc-status-group { width:100%; justify-content:flex-start; }
 body[data-sidebar-layout="sidebar"] main { margin:0; max-width:1120px; width:100%; }
 body[data-sidebar-layout="sidebar"] #logpanel { left:240px; }
 @media (max-width:860px){
@@ -87,8 +87,15 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
 .log-line .st-ok { color:var(--green); } .log-line .st-err { color:var(--red); } .log-line .st-warn { color:var(--yellow); }
 .hist-item { display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;font-size:12.5px; }
 .hist-item .meta { color:var(--text2);font-size:11px; }
-#proc-indicator:hover { background:var(--bg3); }
-#proc-dot.on { background:var(--green)!important;box-shadow:0 0 8px var(--green); }
+#proc-status-group { display:flex;align-items:center;gap:5px;flex-wrap:nowrap;min-width:0;max-width:100%;overflow:hidden; }
+.proc-chip { display:flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;color:var(--text2);padding:6px 8px;border-radius:8px;border:1px solid var(--border);background:transparent;white-space:nowrap;min-height:31px;min-width:0;max-width:148px;flex:0 1 auto; }
+.proc-chip:hover { background:var(--bg3);color:var(--text); }
+.proc-chip:disabled { opacity:.65;cursor:not-allowed; }
+.proc-dot { width:9px;height:9px;border-radius:50%;background:#555;display:inline-block;flex:0 0 auto; }
+.proc-text { min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.proc-chip.state-running .proc-dot { background:var(--green);box-shadow:0 0 8px var(--green); }
+.proc-chip.state-stopped .proc-dot { background:var(--red); }
+.proc-chip.state-unknown .proc-dot { background:#555; }
 .tab-panel { display:none; }
 .tab-panel.active { display:block; }
 
@@ -136,6 +143,8 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
 .sync-section { text-align:center; padding:28px; }
 .sync-section h2 { font-size:20px; margin-bottom:20px; }
 .sync-fields { max-width:480px; margin:0 auto 20px; }
+.sync-pickers { display:flex; gap:8px; justify-content:center; flex-wrap:wrap; margin:-8px auto 16px; }
+.sync-pickers .btn { white-space:nowrap; }
 .sync-checks { display:flex; gap:16px; justify-content:center; margin-bottom:16px; flex-wrap:wrap; }
 .sync-checks label { display:flex; align-items:center; gap:4px; font-size:12px; color:var(--text2); cursor:pointer; }
 .sync-checks input[type=checkbox] { accent-color:var(--accent); }
@@ -204,11 +213,11 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
   <nav class="tabs" id="tabs">
     <div class="tab active" data-tab="overview">&#x1f4ca; 总览</div>
     <div class="tab" data-tab="claude-code">Claude Code</div>
-    <div class="tab" data-tab="claude-desktop">Claude Desktop</div>
+    <div class="tab" data-tab="claude-desktop">Claude Desktop 3P</div>
     <div class="tab" data-tab="codex-cli">Codex CLI</div>
     <div class="tab" data-tab="codex-desktop">Codex Desktop</div>
     <div class="tab" data-tab="models">&#x1f4e6; 模型映射</div>
-    <div class="tab" data-tab="gateway">&#x1f6e3; 中转网关</div>
+    <div class="tab" data-tab="gateway">&#x21aa; 网关入口</div>
     <div class="tab" data-tab="agent-bridge">Agent 桥接</div>
   </nav>
   <div style="margin-left:auto;display:flex;align-items:center;gap:7px;">
@@ -228,9 +237,16 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
       <option value="sidebar">侧边栏导航</option>
     </select>
   </div>
-  <div id="proc-indicator" onclick="restartProcessQuick()" title="Claude Desktop 进程状态 — 点击重启" style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:12px;color:var(--text2);padding:6px 12px;border-radius:8px;border:1px solid var(--border);white-space:nowrap;">
-    <span id="proc-dot" style="width:9px;height:9px;border-radius:50%;background:#555;display:inline-block;"></span>
-    <span id="proc-text">检查中…</span>
+  <div id="proc-status-group" aria-label="客户端运行状态">
+    <button type="button" class="proc-chip state-unknown" data-proc-product="claude-desktop" onclick="confirmRestartProcess('claude-desktop')" title="Claude Desktop 进程状态 — 点击后确认重启">
+      <span class="proc-dot"></span><span class="proc-text">Claude Desktop 检查中…</span>
+    </button>
+    <button type="button" class="proc-chip state-unknown" data-proc-product="codex-desktop" onclick="confirmRestartProcess('codex-desktop')" title="Codex Desktop 进程状态 — 点击后确认重启">
+      <span class="proc-dot"></span><span class="proc-text">Codex Desktop 检查中…</span>
+    </button>
+    <button type="button" class="proc-chip state-unknown" data-proc-product="proxy" onclick="confirmRestartProcess('proxy')" title="Clash Verge 运行状态 — 点击后确认重启">
+      <span class="proc-dot"></span><span class="proc-text">Clash 检查中…</span>
+    </button>
   </div>
 </header>
 
@@ -253,13 +269,19 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
         </div>
       </div>
     </div>
+    <div class="sync-pickers">
+      <button class="btn btn-outline btn-sm" onclick="fillSyncFromProduct('claude-code')">提取 Claude Code</button>
+      <button class="btn btn-outline btn-sm" onclick="fillSyncFromProduct('claude-desktop')">提取 Claude Desktop</button>
+      <button class="btn btn-outline btn-sm" onclick="fillSyncFromProduct('codex-cli')">提取 Codex CLI</button>
+      <button class="btn btn-outline btn-sm" onclick="fillSyncFromProduct('codex-desktop')">提取 Codex Desktop</button>
+    </div>
     <div class="sync-checks">
       <label><input type="checkbox" checked id="sync-cc"> Claude Code</label>
       <label><input type="checkbox" checked id="sync-cd"> Claude Desktop</label>
       <label><input type="checkbox" checked id="sync-cx"> Codex CLI</label>
       <label><input type="checkbox" checked id="sync-cxd"> Codex Desktop</label>
     </div>
-    <button class="btn btn-primary btn-lg" onclick="doSyncAll()">&#x26a1; 应用到所有产品</button>
+    <button class="btn btn-primary btn-lg" onclick="applySyncToSelectedProducts()">&#x26a1; 应用到所选产品</button>
   </div>
 
   <div class="card">
@@ -299,8 +321,8 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
           <input type="checkbox" id="test-apply-restart">
           <span>应用后自动重启相关客户端</span>
         </label>
-        <button class="btn btn-primary btn-sm" onclick="applyRelayToSelectedProducts()">&#x1f4be; 应用到所选产品并保存</button>
-        <div style="font-size:11px;color:var(--text2);margin-top:8px;">会先回填当前检测到的 Base URL / API Key，再调用各产品现有保存逻辑。</div>
+        <button class="btn btn-primary btn-sm" onclick="applyRelayToSelectedProducts()">&#x1f4be; 创建并应用新配置</button>
+        <div style="font-size:11px;color:var(--text2);margin-top:8px;">会为所选产品新建配置并切换到新配置，不覆盖已有配置。</div>
       </div>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
@@ -404,29 +426,29 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
     <div class="form-row">
       <div class="form-group">
         <label>Default Opus Model</label>
-        <input type="text" id="cc-opus-model" placeholder="deepseek-v4-pro[1m]">
+        <input type="text" id="cc-opus-model" list="cc-model-datalist" placeholder="deepseek-v4-pro[1m]">
       </div>
       <div class="form-group">
         <label>Default Sonnet Model</label>
-        <input type="text" id="cc-sonnet-model" placeholder="deepseek-v4-pro[1m]">
+        <input type="text" id="cc-sonnet-model" list="cc-model-datalist" placeholder="deepseek-v4-pro[1m]">
       </div>
       <div class="form-group">
         <label>Default Haiku Model</label>
-        <input type="text" id="cc-haiku-model" placeholder="deepseek-v4-flash">
+        <input type="text" id="cc-haiku-model" list="cc-model-datalist" placeholder="deepseek-v4-flash">
       </div>
     </div>
     <div class="form-row">
       <div class="form-group">
         <label>Default Model</label>
-        <input type="text" id="cc-model" placeholder="deepseek-v4-pro[1m]">
+        <input type="text" id="cc-model" list="cc-model-datalist" placeholder="deepseek-v4-pro[1m]">
       </div>
       <div class="form-group">
         <label>Reasoning Model</label>
-        <input type="text" id="cc-reasoning-model" placeholder="deepseek-v4-flash">
+        <input type="text" id="cc-reasoning-model" list="cc-model-datalist" placeholder="deepseek-v4-flash">
       </div>
       <div class="form-group">
         <label>Subagent Model</label>
-        <input type="text" id="cc-subagent-model" placeholder="deepseek-v4-pro[1m]">
+        <input type="text" id="cc-subagent-model" list="cc-model-datalist" placeholder="deepseek-v4-pro[1m]">
       </div>
     </div>
     <div class="form-row" style="align-items:flex-end;">
@@ -443,6 +465,7 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
         <button class="btn btn-outline btn-sm" onclick="unifyCCModels()">&#x1f500; 统一所有模型为 Default</button>
       </div>
     </div>
+    <datalist id="cc-model-datalist"></datalist>
     <div class="form-row" style="align-items:flex-end;">
       <div class="form-group">
         <label>API Timeout (ms)</label>
@@ -470,16 +493,19 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
       <button class="btn btn-primary" onclick="saveClaudeCode()">&#x1f4be; 保存 Claude Code</button>
       <button class="btn btn-outline btn-sm" onclick="testCCMessage()">&#x1f9ea; 真实对话自测（/v1/messages）</button>
+      <button class="btn btn-outline btn-sm" onclick="fetchClaudeCodeModels()">&#x1f4e6; 获取模型</button>
     </div>
     <div id="cc-test-status" style="font-size:12px;margin-top:8px;"></div>
+    <div id="cc-model-fetch-status" style="font-size:12px;color:var(--text2);margin-top:8px;min-height:20px;"></div>
+    <div class="model-list" id="cc-models-list" style="margin-top:8px;"></div>
   </div>
 </section>
 
 <!-- ============ CLAUDE DESKTOP TAB ============ -->
 <section class="tab-panel" id="panel-claude-desktop">
   <div class="card">
-    <h2>Claude Desktop (3P) 配置</h2>
-    <p style="font-size:12px;color:var(--text2);margin-bottom:12px;">修改 <code style="background:var(--bg3);padding:1px 4px;border-radius:3px;">AppData\Local\Claude-3p\configLibrary\&lt;id&gt;.json</code></p>
+    <h2>Claude Desktop (3P) 接入工作台</h2>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:12px;">统一管理 Claude Desktop 直连配置、本地中转网关和模型名改写。实际写入 <code style="background:var(--bg3);padding:1px 4px;border-radius:3px;">AppData\Local\Claude-3p\configLibrary\&lt;id&gt;.json</code></p>
     <!-- 多套配置管理 -->
     <div style="background:var(--bg3);border-radius:8px;padding:10px 12px;margin-bottom:16px;">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
@@ -494,13 +520,23 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
       </div>
       <p style="font-size:11px;color:var(--text2);margin:6px 0 0;">切换=改变 Claude Desktop 实际生效的配置；下方表单编辑的始终是「当前配置」。改完记得重启 Claude Desktop。</p>
     </div>
+    <div style="background:var(--bg3);border-left:3px solid var(--accent);padding:10px 12px;border-radius:6px;margin-bottom:16px;font-size:12px;color:var(--text2);">
+      <div style="font-weight:600;color:var(--text);margin-bottom:6px;">统一工作流</div>
+      <div>填写真实上游 URL 和 Key → 获取上游模型 → 建立 Claude 模型名到后端模型的映射 → 写入 Claude Desktop 实际读取的配置 → 重启 Claude Desktop → 校验生效。</div>
+      <div id="cd-access-summary" style="margin-top:8px;"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">
+        <button class="btn btn-outline btn-sm" onclick="openClaudeGatewaySettings()">配置本地网关模型名改写</button>
+        <button class="btn btn-outline btn-sm" onclick="switchTab('models')">打开模型库 / 其他客户端映射</button>
+      </div>
+    </div>
+    <h3>Claude Desktop 当前生效配置</h3>
     <div class="form-row">
       <div class="form-group">
-        <label>Base URL</label>
+        <label>Base URL（直连填真实中转站；网关模式由下方一键写为本地网关）</label>
         <input type="text" id="cd-base-url" placeholder="https://api.futureppo.top">
       </div>
       <div class="form-group">
-        <label>API Key</label>
+        <label>API Key（网关模式会写入本地占位 Key，真实 Key 存在网关配置）</label>
         <div class="pwd-wrap">
           <input type="password" id="cd-api-key" placeholder="sk-...">
           <button class="pwd-toggle" onclick="togglePwd('cd-api-key',this)">&#x1f441;</button>
@@ -532,7 +568,7 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
     </div>
     <div class="form-group">
       <label>模型列表 — Claude Desktop 中显示并发送给网关的模型名</label>
-      <p style="font-size:11px;color:var(--text2);margin-bottom:8px;">每行一个模型，名称即实际调用的模型 ID。先到「模型映射」标签页获取可用模型，再回到这里挑选。</p>
+      <p style="font-size:11px;color:var(--text2);margin-bottom:8px;">直连模式填真实后端模型；本地网关模式填左栏 Claude 模型名。网关模式建议使用下方「应用到 Claude Desktop」自动写入，避免把后端模型误写进 inferenceModels。</p>
       <div id="cd-models-list"></div>
       <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
         <button class="btn btn-outline btn-sm" onclick="addCDModel()">+ 添加模型</button>
@@ -543,6 +579,7 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
     <button class="btn btn-primary" onclick="saveClaudeDesktop()">&#x1f4be; 保存 Claude Desktop</button>
     <button class="btn btn-yellow btn-sm" onclick="restartApp('claude-desktop')" style="margin-left:8px;">&#x21bb; 保存后点此重启 Claude Desktop 生效</button>
   </div>
+  <div id="cd-gateway-mount"></div>
 </section>
 
 <!-- ============ CODEX CLI TAB ============ -->
@@ -931,6 +968,7 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
         <select id="fetch-source">
           <option value="claude-code">Claude Code 的配置</option>
           <option value="claude-desktop">Claude Desktop 的配置</option>
+          <option value="gateway-upstream">本地网关上游配置</option>
           <option value="codex-cli">Codex CLI 的配置</option>
           <option value="codex-desktop">Codex Desktop 的配置</option>
           <option value="custom">自定义 Base URL + Key</option>
@@ -971,8 +1009,8 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
   <!-- Claude Desktop model mapping -->
   <div class="card">
     <h2>Claude Desktop — 模型映射</h2>
-    <p style="font-size:12px;color:var(--text2);margin-bottom:12px;">Claude Desktop 的模型列表（inferenceModels）在「Claude Desktop」标签页中以可视化表格编辑。</p>
-    <button class="btn btn-outline btn-sm" onclick="switchTab('claude-desktop')">&#x1f449; 前往 Claude Desktop 标签页编辑模型</button>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:12px;">Claude Desktop 的 inferenceModels 和本地网关的「Claude 模型名 → 后端模型」映射已合并到「Claude Desktop 3P」工作台。模型库仍可用于获取后端模型候选。</p>
+    <button class="btn btn-outline btn-sm" onclick="openClaudeGatewaySettings()">前往 Claude Desktop 3P 工作台</button>
   </div>
 
   <!-- Codex CLI model mapping -->
@@ -1004,6 +1042,11 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
 <!-- ============ GATEWAY TAB ============ -->
 <section class="tab-panel" id="panel-gateway">
   <div class="card">
+    <h2>&#x21aa; 中转网关已合并</h2>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:12px;">中转网关、Claude Desktop 3P 配置和 Claude Desktop 模型映射已统一放在「Claude Desktop 3P」工作台中。该入口保留用于兼容原有导航。</p>
+    <button class="btn btn-primary btn-sm" onclick="openClaudeGatewaySettings()">打开合并后的网关设置</button>
+  </div>
+  <div class="card" id="gateway-config-card">
     <h2>&#x1f6e3; 中转网关（模型名改写代理）</h2>
     <p style="font-size:12px;color:var(--text2);margin-bottom:12px;">RelayManager 内置一个本地网关，替代 CC Switch 的网关。Claude Desktop 把请求发到本地网关，网关把 Anthropic 模型名（如 <code>claude-sonnet-4-5</code>）改写成后端模型（如 <code>glm-5.2</code>），再转发给真实中转站。这样无需 CC Switch，Claude Desktop 也能用没有 Claude 模型的中转站。</p>
     <div style="background:var(--bg3);border-left:3px solid var(--accent);padding:8px 12px;border-radius:4px;margin-bottom:14px;font-size:11px;color:var(--text2);">
@@ -1133,6 +1176,7 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
 let currentState = {};
 let fetchedModels = [];
 let currentUiSettings = { theme: 'classic', sidebarLayout: 'classic' };
+let uiSettingsReady = false;
 
 // ========== UI HELPERS ==========
 function toast(msg, type) {
@@ -1164,14 +1208,61 @@ function switchTab(name) {
   if (panel) panel.classList.add('active');
   if (name === 'codex-desktop') renderUpstreamTables();
   if (name === 'models') renderMappingForms();
-  if (name === 'claude-desktop') renderCDModels();
+  if (name === 'claude-desktop') { renderCDModels(); updateCDAccessSummary(); }
   if (name === 'agent-bridge') loadAgentBridge();
+}
+
+function mountGatewayIntoClaudeDesktop() {
+  // 将原中转网关卡片移动到 Claude Desktop 工作台，避免维护两套相同表单。
+  const card = document.getElementById('gateway-config-card');
+  const mount = document.getElementById('cd-gateway-mount');
+  if (card && mount && card.parentElement !== mount) mount.appendChild(card);
+}
+
+function openClaudeGatewaySettings() {
+  switchTab('claude-desktop');
+  setTimeout(function () {
+    const target = document.getElementById('gateway-config-card') || document.getElementById('cd-gateway-mount');
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    updateCDAccessSummary();
+  }, 0);
+}
+
+function isLoopbackGatewayUrl(value) {
+  return /^(https?:\/\/)(127\.|localhost)/i.test(String(value || '').trim());
+}
+
+function updateCDAccessSummary() {
+  const el = document.getElementById('cd-access-summary');
+  if (!el) return;
+  const cd = currentState.claudeDesktop || {};
+  const port = getVal('gw-port') || '9877';
+  const gatewayUrl = 'http://127.0.0.1:' + port;
+  const usingGateway = isLoopbackGatewayUrl(cd.baseUrl);
+  const cdModels = parseCDModels(cd.models).map(m => m.name).filter(Boolean);
+  const routeCount = Array.isArray(gwRoutes) ? gwRoutes.length : 0;
+  const modeText = usingGateway ? '本地网关模型名改写' : (cd.baseUrl ? '直连真实中转站' : '未配置');
+  const keyText = cd.apiKey ? '已配置' : '未设置';
+  el.innerHTML = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;">' +
+    '<div>当前模式：<b style="color:var(--text);">' + esc(modeText) + '</b></div>' +
+    '<div>Claude Desktop Base URL：<span class="mono">' + esc(cd.baseUrl || '(未设置)') + '</span></div>' +
+    '<div>Claude Desktop Key：' + esc(keyText) + '</div>' +
+    '<div>本地网关地址：<span class="mono">' + esc(gatewayUrl) + '</span></div>' +
+    '<div>Claude 模型数：' + cdModels.length + '</div>' +
+    '<div>网关映射数：' + routeCount + '</div>' +
+    '</div>';
 }
 
 var tabButtons = document.querySelectorAll('.tab');
 for (var i = 0; i < tabButtons.length; i++) {
   tabButtons[i].addEventListener('click', (function (btn) {
-    return function () { switchTab(btn.dataset.tab); };
+    return function () {
+      if (btn.dataset.tab === 'gateway') {
+        openClaudeGatewaySettings();
+        return;
+      }
+      switchTab(btn.dataset.tab);
+    };
   })(tabButtons[i]));
 }
 
@@ -1188,8 +1279,73 @@ async function api(path, method, body) {
   return res.json();
 }
 
+const CONFIG_API = {
+  'claude-desktop': {
+    label: 'Claude Desktop',
+    list: '/api/claude-desktop/configs',
+    create: '/api/claude-desktop/config/create',
+    apply: '/api/claude-desktop/config/apply',
+    rename: '/api/claude-desktop/config/rename',
+    delete: '/api/claude-desktop/config/delete',
+    export: '/api/claude-desktop/config/export',
+  },
+  'claude-code': {
+    label: 'Claude Code',
+    list: '/api/claude-code/configs',
+    create: '/api/claude-code/config/create',
+    apply: '/api/claude-code/config/apply',
+    update: '/api/claude-code/config/update',
+    rename: '/api/claude-code/config/rename',
+    delete: '/api/claude-code/config/delete',
+    export: '/api/claude-code/config/export',
+    import: '/api/claude-code/config/import',
+  },
+  'codex-cli': {
+    label: 'Codex CLI',
+    list: '/api/codex-cli/config/list',
+    create: '/api/codex-cli/config/create',
+    apply: '/api/codex-cli/config/apply',
+    rename: '/api/codex-cli/config/rename',
+    delete: '/api/codex-cli/config/delete',
+    export: '/api/codex-cli/config/export',
+    import: '/api/codex-cli/config/import',
+  },
+  'codex-desktop': {
+    label: 'Codex Desktop',
+    list: '/api/codex-desktop/config/list',
+    create: '/api/codex-desktop/config/create',
+    apply: '/api/codex-desktop/config/apply',
+    rename: '/api/codex-desktop/config/rename',
+    delete: '/api/codex-desktop/config/delete',
+    export: '/api/codex-desktop/config/export',
+    import: '/api/codex-desktop/config/import',
+  },
+};
+
+function configSpec(product) {
+  const spec = CONFIG_API[product];
+  if (!spec) throw new Error('未知产品配置接口: ' + product);
+  return spec;
+}
+
+function configApi(product, action, method, body) {
+  const endpoint = configSpec(product)[action];
+  if (!endpoint) throw new Error('产品不支持配置操作: ' + product + '/' + action);
+  return api(endpoint, method || 'GET', body);
+}
+
+function configExportUrl(product, id, stripKey) {
+  return configSpec(product).export + '?id=' + encodeURIComponent(id) + (stripKey ? '&stripKey=1' : '');
+}
+
+async function createAndApplyConfig(product, name, config) {
+  const res = await configApi(product, 'create', 'POST', { name, config });
+  await configApi(product, 'apply', 'POST', { id: res.id });
+  return res;
+}
+
 function loadState() {
-  api('/api/state', 'GET')
+  return api('/api/state', 'GET')
     .then(function (state) {
       currentState = state;
       populateAllForms();
@@ -1212,8 +1368,10 @@ function loadUiSettings() {
     currentUiSettings.theme = saved.theme || 'classic';
     currentUiSettings.sidebarLayout = saved.sidebarLayout || 'classic';
   } catch (e) {}
-  setTheme(currentUiSettings.theme);
+  uiSettingsReady = false;
+  applyTheme(currentUiSettings.theme);
   applySidebarLayout(currentUiSettings.sidebarLayout);
+  uiSettingsReady = true;
 }
 
 
@@ -1245,6 +1403,7 @@ function populateAllForms() {
   setVal('cd-egress', cd.egressHosts);
   renderCDModels(cd.models);
   loadCDConfigs();
+  updateCDAccessSummary();
 
   // Codex CLI
   setVal('cx-base-url', cx.baseUrl); setVal('cx-api-key', cx.apiKey);
@@ -1269,8 +1428,9 @@ function populateAllForms() {
   loadCXDConfigs();
 
   // Sync inputs
-  const syncUrl = cc.baseUrl || cd.baseUrl || cx.baseUrl || '';
-  const syncKey = cc.authToken || cd.apiKey || cx.apiKey || '';
+  const cxdPrimary = getPrimaryCXDUpstream(cxd);
+  const syncUrl = cc.baseUrl || cd.baseUrl || cx.baseUrl || cxdPrimary?.baseUrl || '';
+  const syncKey = cc.authToken || cd.apiKey || cx.apiKey || (cxdPrimary?.apiKeys || [])[0] || '';
   setVal('sync-base-url', syncUrl); setVal('sync-api-key', syncKey);
 }
 
@@ -1282,6 +1442,42 @@ function setVal(id, val) {
   else el.value = val || '';
 }
 function getVal(id) { return document.getElementById(id)?.value || ''; }
+
+function getProductRelayConfig(product) {
+  // 中文注释：优先读取页面当前表单值，确保“当前使用/正在编辑”的配置可以直接回填到总览同步框。
+  if (product === 'claude-code') {
+    return { label: 'Claude Code', baseUrl: getVal('cc-base-url'), apiKey: getVal('cc-api-key') };
+  }
+  if (product === 'claude-desktop') {
+    return { label: 'Claude Desktop', baseUrl: getVal('cd-base-url'), apiKey: getVal('cd-api-key') };
+  }
+  if (product === 'codex-cli') {
+    return { label: 'Codex CLI', baseUrl: getVal('cx-base-url'), apiKey: getVal('cx-api-key') };
+  }
+  if (product === 'codex-desktop') {
+    const cxd = currentState.codexDesktop || {};
+    const primary = getPrimaryCXDUpstream(cxd);
+    return {
+      label: 'Codex Desktop',
+      baseUrl: getVal('cxd-quick-url') || primary?.baseUrl || cxd.injectedBaseUrl || '',
+      apiKey: getVal('cxd-quick-key') || (primary?.apiKeys || [])[0] || cxd.injectedApiKey || '',
+    };
+  }
+  return { label: '未知产品', baseUrl: '', apiKey: '' };
+}
+
+function fillSyncFromProduct(product) {
+  const cfg = getProductRelayConfig(product);
+  const baseUrl = (cfg.baseUrl || '').trim();
+  const apiKey = (cfg.apiKey || '').trim();
+  if (!baseUrl && !apiKey) {
+    toast(cfg.label + ' 当前没有可提取的 Base URL / API Key', 'error');
+    return;
+  }
+  setVal('sync-base-url', baseUrl);
+  setVal('sync-api-key', apiKey);
+  toast('已提取 ' + cfg.label + ' 当前配置到一键同步框');
+}
 
 // ========== STATUS GRID ==========
 function renderStatusGrid() {
@@ -1336,9 +1532,11 @@ async function loadAppPaths() {
       const a = apps[key] || {};
       const input = document.getElementById('path-' + key);
       const status = document.getElementById('path-status-' + key);
-      if (input) input.value = a.customPath || a.exe || '';
+      if (input) input.value = a.customPath || a.exe || a.detectedFromProcess || '';
       if (status) {
-        if (a.exe) status.innerHTML = '<span style="color:var(--green);">&#x2705; 已检测</span>';
+        if (a.customPath) status.innerHTML = '<span style="color:var(--green);">&#x2705; 已手动配置</span>';
+        else if (a.exe) status.innerHTML = '<span style="color:var(--green);">&#x2705; 已检测</span>';
+        else if (a.detectedFromProcess) status.innerHTML = '<span style="color:var(--green);">&#x2705; 已从运行进程发现</span>';
         else status.innerHTML = '<span style="color:var(--red);">&#x274c; 未检测到，请手动填写</span>';
       }
     }
@@ -1418,6 +1616,10 @@ async function getFetchCredentials() {
         return { baseUrl: cc.baseUrl, apiKey: cc.authToken, source: loopback ? 'Claude Desktop 指向本地网关，改用 Claude Code 中转站' : '改用 Claude Code 中转站' };
       }
       return { baseUrl: '', apiKey: '', source: '未找到可用中转站。Claude Desktop 的 Base URL 指向本地网关且 Claude Code 也未配置中转站，请用「自定义」填写真实中转站地址' };
+    }
+    case 'gateway-upstream': {
+      const gw = await api('/api/gateway', 'GET');
+      return { baseUrl: gw.upstreamBaseUrl || '', apiKey: gw.upstreamApiKey || '', source: '本地网关上游配置' };
     }
     case 'codex-cli': return { baseUrl: s.codexCli?.baseUrl, apiKey: s.codexCli?.apiKey };
     case 'codex-desktop': {
@@ -1728,24 +1930,114 @@ function deleteUpstream(idx) {
 }
 
 // ========== SAVE FUNCTIONS ==========
-async function doSyncAll() {
-  const baseUrl = getVal('sync-base-url');
-  const apiKey = getVal('sync-api-key');
-  if (!baseUrl) { toast('请输入 Base URL', 'error'); return; }
-  const data = { syncAll: {
-    baseUrl, apiKey,
-    claudeCode: document.getElementById('sync-cc').checked,
-    claudeDesktop: document.getElementById('sync-cd').checked,
-    codexCli: document.getElementById('sync-cx').checked,
-    codexDesktop: document.getElementById('sync-cxd').checked,
-  }};
+function getSelectedSyncTargets() {
+  const targets = [];
+  if (document.getElementById('sync-cc')?.checked) targets.push('claude-code');
+  if (document.getElementById('sync-cd')?.checked) targets.push('claude-desktop');
+  if (document.getElementById('sync-cx')?.checked) targets.push('codex-cli');
+  if (document.getElementById('sync-cxd')?.checked) targets.push('codex-desktop');
+  return targets;
+}
+
+function syncConfigName(baseUrl) {
+  const raw = normalizeRelayBaseUrl(baseUrl) || 'new-relay';
+  const stamp = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const time = `${stamp.getFullYear()}${pad(stamp.getMonth()+1)}${pad(stamp.getDate())}_${pad(stamp.getHours())}${pad(stamp.getMinutes())}${pad(stamp.getSeconds())}`;
+  const name = raw.replace(/^https?:\/\//i, '').replace(/\/+$/, '').replace(/[^\w.-]+/g, '_') || 'new-relay';
+  return name + '_' + time;
+}
+
+function buildCCSyncConfig(baseUrl, apiKey) {
+  const cfg = collectCCConfig();
+  cfg.baseUrl = baseUrl;
+  cfg.authToken = apiKey;
+  return cfg;
+}
+
+function buildCDSyncConfig(baseUrl, apiKey) {
+  return {
+    baseUrl,
+    apiKey,
+    authScheme: getVal('cd-auth-scheme') || 'bearer',
+    provider: getVal('cd-provider') || 'gateway',
+    egressHosts: getVal('cd-egress') || '*',
+    models: collectCDModels(),
+  };
+}
+
+function buildCXSyncConfig(baseUrl, apiKey) {
+  const cfg = collectCXConfig();
+  cfg.baseUrl = baseUrl;
+  cfg.apiKey = apiKey;
+  return cfg;
+}
+
+function buildCXDSyncConfig(baseUrl, apiKey) {
+  const q = {
+    baseUrl,
+    apiKey,
+    model: (getVal('cxd-quick-model') || firstKey(getPrimaryCXDUpstream(currentState.codexDesktop || {})?.modelMapping, 'gpt-5.5')).trim(),
+    serviceType: getVal('cxd-quick-service') || 'responses',
+    reasoning: getVal('cxd-quick-reasoning') || 'xhigh',
+  };
+  const config = buildCXDConfigFromQuickForm(q);
+  config.injectedBaseUrl = getVal('cxd-injected-url');
+  config.injectedApiKey = getVal('cxd-injected-key');
+  return config;
+}
+
+async function createAndApplyProductConfig(product, baseName, baseUrl, apiKey) {
+  // 中文注释：先创建新配置，再应用新配置；不调用旧 syncAll，避免覆盖已有预设内容。
+  if (product === 'claude-code') {
+    await createAndApplyConfig(product, baseName + ' / ' + configSpec(product).label, buildCCSyncConfig(baseUrl, apiKey));
+    return configSpec(product).label;
+  }
+  if (product === 'claude-desktop') {
+    await createAndApplyConfig(product, baseName + ' / ' + configSpec(product).label, buildCDSyncConfig(baseUrl, apiKey));
+    return configSpec(product).label;
+  }
+  if (product === 'codex-cli') {
+    await createAndApplyConfig(product, baseName + ' / ' + configSpec(product).label, buildCXSyncConfig(baseUrl, apiKey));
+    return configSpec(product).label;
+  }
+  if (product === 'codex-desktop') {
+    await createAndApplyConfig(product, baseName + ' / ' + configSpec(product).label, buildCXDSyncConfig(baseUrl, apiKey));
+    return configSpec(product).label;
+  }
+  throw new Error('未知产品: ' + product);
+}
+
+async function applyBaseUrlKeyToTargets(baseUrl, apiKey, targets) {
+  const applied = [];
+  const failed = [];
+  const baseName = syncConfigName(baseUrl);
   try {
-    showLoading('sync');
-    const res = await api('/api/save', 'POST', data);
-    hideLoading('sync');
-    if (res.success) { toast('已同步 ' + res.backups.length + ' 个配置文件'); loadState(); }
-    else { toast(res.error || '保存失败', 'error'); }
-  } catch (e) { toast('保存失败: ' + e.message, 'error'); }
+    showLoading();
+    for (const target of targets) {
+      try {
+        applied.push(await createAndApplyProductConfig(target, baseName, baseUrl, apiKey));
+      } catch (e) {
+        failed.push(target + ': ' + e.message);
+      }
+    }
+  } finally {
+    hideLoading();
+  }
+
+  await loadState();
+  if (applied.length) toast('已创建并应用新配置：' + applied.join('、'));
+  if (failed.length) toast('部分产品失败：' + failed.join('；'), 'error');
+}
+
+async function applySyncToSelectedProducts() {
+  const baseUrl = normalizeRelayBaseUrl(getVal('sync-base-url'));
+  const apiKey = (getVal('sync-api-key') || '').trim();
+  const targets = getSelectedSyncTargets();
+  if (!baseUrl) { toast('请输入 Base URL', 'error'); return; }
+  if (!targets.length) { toast('请至少选择一个产品', 'error'); return; }
+  setVal('sync-base-url', baseUrl);
+  await applyBaseUrlKeyToTargets(baseUrl, apiKey, targets);
 }
 async function saveClaudeCode() {
   // Optionally append [1m] to all model fields
@@ -1768,8 +2060,8 @@ async function saveClaudeCode() {
   await api('/api/save', 'POST', data);
   // 若存在「生效中」的预设，把本次保存内容同步进去，保持预设与 settings.json 一致。
   try {
-    const list = await api('/api/claude-code/configs', 'GET');
-    if (list.appliedId) await api('/api/claude-code/config/update', 'POST', { id: list.appliedId, config: data.claudeCode });
+    const list = await configApi('claude-code', 'list');
+    if (list.appliedId) await configApi('claude-code', 'update', 'POST', { id: list.appliedId, config: data.claudeCode });
   } catch (e) { /* 无预设时忽略 */ }
   toast('Claude Code 配置已保存' + (add1m ? '（已追加 [1m]）' : '')); loadState();
 }
@@ -1783,6 +2075,55 @@ function unifyCCModels() {
   setVal('cc-reasoning-model', def);
   setVal('cc-subagent-model', def);
   toast('已将 Opus/Sonnet/Haiku/Reasoning/Subagent 统一为 ' + def + '，记得保存');
+}
+
+async function fetchClaudeCodeModels() {
+  const baseUrl = getVal('cc-base-url');
+  const apiKey = getVal('cc-api-key');
+  const status = document.getElementById('cc-model-fetch-status');
+  const list = document.getElementById('cc-models-list');
+  if (!baseUrl || !apiKey) {
+    status.innerHTML = '<span style="color:var(--red);">&#x274c; 请先填写 Base URL 和 API Key</span>';
+    list.innerHTML = '';
+    return;
+  }
+  status.innerHTML = '<span class="loading"></span> 正在获取模型...';
+  list.innerHTML = '';
+  try {
+    const params = new URLSearchParams({ baseUrl, apiKey });
+    const res = await fetch('/api/claude-code/models?' + params);
+    const data = await res.json();
+    renderClaudeCodeModels(data);
+    if (data.success) {
+      status.innerHTML = '<span style="color:var(--green);">&#x2705; 获取到 ' + (data.total || 0) + ' 个模型，可在模型输入框下拉选择</span>';
+    } else {
+      status.innerHTML = '<span style="color:var(--red);">&#x274c; ' + esc(data.error || '获取失败') + '</span>';
+    }
+  } catch (e) {
+    status.innerHTML = '<span style="color:var(--red);">&#x274c; ' + esc(e.message) + '</span>';
+  }
+}
+
+function renderClaudeCodeModels(data) {
+  const models = (data && data.models) || [];
+  const datalist = document.getElementById('cc-model-datalist');
+  const list = document.getElementById('cc-models-list');
+  if (datalist) datalist.innerHTML = models.map(m => '<option value="' + esc(String(m.id)) + '">').join('');
+  if (!models.length) {
+    list.innerHTML = data && data.error ? '<p style="color:var(--text2);font-size:12px;">' + esc(data.error) + '</p>' : '';
+    return;
+  }
+  list.innerHTML = '<h3>Claude Code 可用模型 (' + models.length + ')</h3>' +
+    models.map(m => '<div class="model-item">' +
+      '<span class="model-id">' + esc(String(m.id)) + '</span>' +
+      '<span class="model-owner">' + esc(String(m.owned_by || '')) + '</span>' +
+      '<button class="copy-btn" data-model="' + esc(String(m.id)) + '" onclick="setClaudeCodeDefaultModel(this.dataset.model)" title="填入 Default Model">填入 Default</button>' +
+      '</div>').join('');
+}
+
+function setClaudeCodeDefaultModel(model) {
+  setVal('cc-model', model);
+  toast('已填入 Default Model：' + model + '，其它字段可从下拉列表选择');
 }
 function normalizeCDBaseUrl() {
   let v = (getVal('cd-base-url') || '').trim();
@@ -2611,73 +2952,13 @@ async function applyRelayToSelectedProducts() {
   if (!baseUrl) { toast('请先填写 Base URL', 'error'); return; }
   if (targets.length === 0) { toast('请先选择至少一个目标产品', 'error'); return; }
   if (!apiKey) { toast('请先填写 API Key', 'error'); return; }
+  await applyBaseUrlKeyToTargets(baseUrl, apiKey, targets);
 
-  // 回填表单字段（URL + Key），供 collectCCConfig / collectCXConfig / saveXxx 使用
-  if (targets.includes('claude-code')) {
-    setVal('cc-base-url', baseUrl);
-    setVal('cc-api-key', apiKey);
-  }
-  if (targets.includes('claude-desktop')) {
-    setVal('cd-base-url', baseUrl);
-    setVal('cd-api-key', apiKey);
-  }
-  if (targets.includes('codex-cli')) {
-    setVal('cx-base-url', baseUrl);
-    setVal('cx-api-key', apiKey);
-  }
-  if (targets.includes('codex-desktop')) {
-    const s = currentState.codexDesktop || {};
-    const resp = Array.isArray(s.responsesUpstream) ? s.responsesUpstream.map(u => ({ ...u })) : [];
-    const chat = Array.isArray(s.chatUpstream) ? s.chatUpstream.map(u => ({ ...u })) : [];
-    const activeResp = resp.filter(e => e.status === 'active').sort((a, b) => (a.priority || 99) - (b.priority || 99));
-    const activeChat = chat.filter(e => e.status === 'active').sort((a, b) => (a.priority || 99) - (b.priority || 99));
-    if (activeResp[0]) { activeResp[0].baseUrl = baseUrl; activeResp[0].apiKeys = [apiKey]; }
-    if (activeChat[0]) { activeChat[0].baseUrl = baseUrl; activeChat[0].apiKeys = [apiKey]; }
-  }
-
-  const saved = [];
-  const defaultName = baseUrl.replace(/^https?:\/\//, '').replace(/\/+$/, '').replace(/[\/:]/g, '_');
-
-  // Claude Code：创建预设（多配置清单），不覆盖当前生效的 settings.json
-  if (targets.includes('claude-code')) {
-    const name = prompt('为 Claude Code 预设命名（不会覆盖当前已生效的配置）：', defaultName);
-    if (name !== null && name.trim()) {
-      try {
-        const res = await api('/api/claude-code/config/create', 'POST', { name: name.trim(), config: collectCCConfig() });
-        await loadCCConfigs();
-        saved.push('Claude Code 预设「' + name.trim() + '」已创建（未覆盖当前生效配置）');
-      } catch (e) { saved.push('Claude Code 创建失败: ' + e.message); }
-    } else if (name !== null) {
-      saved.push('Claude Code 跳过（未输入名称）');
-    }
-  }
-
-  // Codex CLI：创建预设（多配置清单），不覆盖当前生效的 config.toml
-  if (targets.includes('codex-cli')) {
-    const name = prompt('为 Codex CLI 预设命名（不会覆盖当前已生效的配置）：', defaultName);
-    if (name !== null && name.trim()) {
-      try {
-        await api('/api/codex-cli/config/create', 'POST', { name: name.trim(), config: collectCXConfig() });
-        saved.push('Codex CLI 预设「' + name.trim() + '」已创建（未覆盖当前生效配置）');
-      } catch (e) { saved.push('Codex CLI 创建失败: ' + e.message); }
-    } else if (name !== null) {
-      saved.push('Codex CLI 跳过（未输入名称）');
-    }
-  }
-
-  // Claude Desktop / Codex Desktop：无多配置预设系统，沿用直接保存逻辑
-  if (targets.includes('claude-desktop')) { await saveClaudeDesktop(); saved.push('Claude Desktop 已保存'); }
-  if (targets.includes('codex-desktop')) { await saveCodexDesktopUpstream(); saved.push('Codex Desktop 已保存'); }
-
-  // 仅 Claude Desktop / Codex Desktop 需要重启生效，Claude Code / Codex CLI 的预设不会改动配置文件
   const hasDesktopTarget = targets.includes('claude-desktop') || targets.includes('codex-desktop');
   if (hasDesktopTarget && document.getElementById('test-apply-restart')?.checked) {
     if (targets.includes('claude-desktop')) await restartApp('claude-desktop');
     if (targets.includes('codex-desktop')) await restartApp('codex-desktop');
   }
-
-  toast('已完成：' + saved.join('；'));
-  loadState();
 }
 
 // ========== PROXY ==========
@@ -2735,6 +3016,7 @@ function hideLoading() {
 }
 
 // ========== INIT ==========
+mountGatewayIntoClaudeDesktop();
 loadState();
 loadGateway();
 loadAutostart();
@@ -2824,6 +3106,7 @@ async function loadGateway() {
       const port = cfg.port || 9877;
       status.innerHTML = '网关地址: <span style="color:var(--accent);">http://127.0.0.1:' + port + '</span>（Claude Desktop 的 Base URL 应指向此地址，勿加 /v1，Claude Desktop 会自动拼 /v1/messages）';
     }
+    updateCDAccessSummary();
   } catch (e) {}
 }
 
@@ -2832,6 +3115,7 @@ function renderGWRoutes() {
   if (!container) return;
   if (gwRoutes.length === 0) {
     container.innerHTML = '<p style="color:var(--text2);font-size:12px;">暂无映射，点击下方添加</p>';
+    updateCDAccessSummary();
     return;
   }
   container.innerHTML = gwRoutes.map((r, i) => `<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap;">
@@ -2840,6 +3124,7 @@ function renderGWRoutes() {
     <input list="gw-backend-datalist" value="${esc(r.backend||'')}" data-idx="${i}" data-field="backend" placeholder="glm-5.2" style="flex:1;min-width:160px;">
     <button class="btn btn-red btn-sm" onclick="removeGWRoute(${i})">&#x2715;</button>
   </div>`).join('');
+  updateCDAccessSummary();
 }
 
 function addGWRoute(anthropic, backend) {
@@ -2969,100 +3254,215 @@ async function testCCMessage() {
 }
 
 // ========== Claude Desktop 多套配置管理 ==========
-let cdConfigList = [];
-
-async function loadCDConfigs() {
-  try {
-    const data = await api('/api/claude-desktop/configs', 'GET');
-    cdConfigList = data.configs || [];
-    const sel = document.getElementById('cd-config-select');
-    if (!sel) return;
-    if (cdConfigList.length === 0) {
-      sel.innerHTML = '<option value="">（无配置，点「新建」创建）</option>';
-      return;
-    }
-    sel.innerHTML = cdConfigList.map(c =>
-      `<option value="${esc(c.id)}" ${c.applied ? 'selected' : ''}>${esc(c.name)}${c.applied ? '（生效中）' : ''} — ${esc(c.baseUrl || '未设地址')}</option>`
-    ).join('');
-  } catch (e) { /* CD 未安装时静默 */ }
-}
-
-async function switchCDConfig() {
-  const id = getVal('cd-config-select');
-  if (!id) return;
-  try {
-    await api('/api/claude-desktop/config/apply', 'POST', { id });
-    toast('已切换生效配置，正在加载…');
-    await loadState();   // 重载表单为新生效配置
-  } catch (e) { toast('切换失败：' + e.message, 'error'); }
-}
-
-async function newCDConfig() {
-  const name = prompt('新配置名称：', '新中转配置');
-  if (name === null) return;
-  try {
-    // 用当前表单内容作为新配置初始值（方便“复制一份再改”）
-    const config = {
-      baseUrl: getVal('cd-base-url'), apiKey: getVal('cd-api-key'),
-      authScheme: getVal('cd-auth-scheme'), provider: getVal('cd-provider') || 'gateway',
-      egressHosts: getVal('cd-egress') || '*', models: collectCDModels(),
+// 多产品配置预设的通用 UI 操作；各产品只保留采集表单和生效策略差异。
+function configUiSpec(product) {
+  if (product === 'claude-desktop') {
+    return {
+      selectId: 'cd-config-select',
+      getList: () => cdConfigList,
+      setList: list => { cdConfigList = list; },
+      emptyText: '（无配置，点“新建”创建）',
+      configFileName: '配置文件',
+      optionText: c => `${esc(c.name)}${c.applied ? '（生效中）' : ''} — ${esc(c.baseUrl || '未设地址')}`,
     };
-    const res = await api('/api/claude-desktop/config/create', 'POST', { name, config });
-    await api('/api/claude-desktop/config/apply', 'POST', { id: res.id });
-    toast('已创建并切换到「' + name + '」，并写入实际配置');
-    await loadState();
-  } catch (e) { toast('创建失败：' + e.message, 'error'); }
+  }
+  if (product === 'claude-code') {
+    return {
+      selectId: 'cc-config-select',
+      getList: () => ccConfigList,
+      setList: list => { ccConfigList = list; },
+      emptyText: '（无预设，点“新建”把当前表单存为一套）',
+      configFileName: 'settings.json',
+      optionText: c => `${esc(c.name)}${c.applied ? '（生效中）' : ''} — ${esc(c.baseUrl || '未设地址')}`,
+    };
+  }
+  if (product === 'codex-cli') {
+    return {
+      selectId: 'cx-config-select',
+      getList: () => cxConfigList,
+      setList: list => { cxConfigList = list; },
+      emptyText: '（无预设，点“新建”把当前表单存为一套）',
+      configFileName: 'config.toml',
+      afterLoad: data => renderCXEffectiveStatus(data),
+      optionText: c => `${esc(c.name)}${c.applied ? '（生效中）' : ''}${c.unsupported ? '（不支持 chat）' : ''} — ${esc(c.baseUrl || '未设地址')}`,
+    };
+  }
+  if (product === 'codex-desktop') {
+    return {
+      selectId: 'cxd-config-select',
+      getList: () => cxdConfigList,
+      setList: list => { cxdConfigList = list; },
+      emptyText: '（无预设，点“新建”把当前表单存为一套）',
+      configFileName: '配置文件',
+      optionText: c => `${esc(c.name)}${c.applied ? '（生效中）' : ''} — ${esc(c.baseUrl || c.injectedBaseUrl || '未设地址')}`,
+    };
+  }
+  throw new Error('未知产品配置 UI: ' + product);
 }
 
-async function renameCDConfigUI() {
-  const id = getVal('cd-config-select');
-  if (!id) { toast('请先选择一个配置', 'error'); return; }
-  const cur = cdConfigList.find(c => c.id === id);
-  const name = prompt('重命名配置：', cur ? cur.name : '');
+async function loadConfigList(product) {
+  try {
+    const spec = configUiSpec(product);
+    const data = await configApi(product, 'list');
+    const configs = data.configs || [];
+    spec.setList(configs);
+    if (spec.afterLoad) spec.afterLoad(data);
+    const sel = document.getElementById(spec.selectId);
+    if (!sel) return data;
+    if (configs.length === 0) {
+      sel.innerHTML = '<option value="">' + esc(spec.emptyText) + '</option>';
+      return data;
+    }
+    sel.innerHTML = configs.map(c =>
+      `<option value="${esc(c.id)}" ${c.applied ? 'selected' : ''}>${spec.optionText(c)}</option>`
+    ).join('');
+    return data;
+  } catch (e) {
+    return null;
+  }
+}
+
+function selectedConfig(product) {
+  const spec = configUiSpec(product);
+  const id = getVal(spec.selectId);
+  const entry = id ? spec.getList().find(c => c.id === id) : null;
+  return { spec, id, entry };
+}
+
+async function applySelectedConfig(product, successMessage) {
+  const selected = selectedConfig(product);
+  if (!selected.id) return;
+  try {
+    await configApi(product, 'apply', 'POST', { id: selected.id });
+    toast(successMessage);
+    await loadState();
+  } catch (e) {
+    toast('切换失败：' + e.message, 'error');
+  }
+}
+
+async function renameSelectedConfig(product, reloadFn) {
+  const selected = selectedConfig(product);
+  if (!selected.id) { toast('请先选择一个配置', 'error'); return; }
+  const name = prompt('重命名配置：', selected.entry ? selected.entry.name : '');
   if (name === null || !name.trim()) return;
   try {
-    await api('/api/claude-desktop/config/rename', 'POST', { id, name: name.trim() });
-    toast('已重命名'); await loadCDConfigs();
-  } catch (e) { toast('重命名失败：' + e.message, 'error'); }
+    await configApi(product, 'rename', 'POST', { id: selected.id, name: name.trim() });
+    toast('已重命名');
+    await (reloadFn || (() => loadConfigList(product)))();
+  } catch (e) {
+    toast('重命名失败：' + e.message, 'error');
+  }
 }
 
-async function deleteCDConfigUI() {
-  const id = getVal('cd-config-select');
-  if (!id) { toast('请先选择一个配置', 'error'); return; }
-  const cur = cdConfigList.find(c => c.id === id);
-  if (!confirm('确定删除配置「' + (cur ? cur.name : id) + '」？\n（仅从预设清单移除，不改动当前 settings.json）')) return;
+async function deleteSelectedConfig(product, reloadFn) {
+  const selected = selectedConfig(product);
+  if (!selected.id) { toast('请先选择一个配置', 'error'); return; }
+  const label = selected.entry ? selected.entry.name : selected.id;
+  if (!confirm('确定删除配置「' + label + '」？\n（仅从预设清单移除，不改动当前 ' + selected.spec.configFileName + '）')) return;
   try {
-    await api('/api/claude-desktop/config/delete', 'POST', { id });
-    toast('已删除'); await loadState();
-  } catch (e) { toast('删除失败：' + e.message, 'error'); }
+    await configApi(product, 'delete', 'POST', { id: selected.id });
+    toast('已删除');
+    await (reloadFn || (() => loadConfigList(product)))();
+  } catch (e) {
+    toast('删除失败：' + e.message, 'error');
+  }
 }
 
-function exportCDConfigUI() {
-  const id = getVal('cd-config-select');
-  if (!id) { toast('请先选择一个配置', 'error'); return; }
-  // 询问是否包含密钥：分享/备份给他人时建议去除密钥，避免泄露。
-  // confirm 的「确定」= 含密钥，「取消」= 不含密钥（先单独确认是否导出）。
-  const choice = confirm('导出是否包含 API Key？\n\n点「确定」= 含密钥（完整备份，请勿外传）\n点「取消」= 不含密钥（可安全分享）');
-  const stripKey = choice ? '' : '&stripKey=1';
-  window.location.href = '/api/claude-desktop/config/export?id=' + encodeURIComponent(id) + stripKey;
+function exportSelectedConfig(product) {
+  const selected = selectedConfig(product);
+  if (!selected.id) { toast('请先选择一个配置', 'error'); return; }
+  const choice = confirm('导出是否包含 API Key？\n\n点“确定”= 含密钥（完整备份，请勿外传）\n点“取消”= 不含密钥（可安全分享）');
+  window.location.href = configExportUrl(product, selected.id, !choice);
   toast(choice ? '正在导出（含密钥）' : '正在导出（已去除密钥）');
 }
 
-async function importCDConfigUI(event) {
+async function importConfigFile(event, product, options) {
+  const opts = options || {};
   const file = event.target.files && event.target.files[0];
-  event.target.value = '';   // 允许重复选同一文件
+  event.target.value = '';
   if (!file) return;
   try {
     const text = await file.text();
     const parsed = JSON.parse(text);
-    // 兼容两种格式：{name, config:{...}} 或直接是 config 对象
     const config = parsed.config || parsed;
     const name = parsed.name || file.name.replace(/\.json$/i, '') || '导入配置';
-    const res = await api('/api/claude-desktop/config/create', 'POST', { name, config });
-    await api('/api/claude-desktop/config/apply', 'POST', { id: res.id });
-    toast('已导入并切换到「' + name + '」');
-    await loadState();
-  } catch (e) { toast('导入失败：' + e.message + '（请确认是有效的配置 JSON）', 'error'); }
+    const action = configSpec(product).import ? 'import' : 'create';
+    const res = await configApi(product, action, 'POST', { name, config });
+    if (opts.applyAfterImport !== false) {
+      await configApi(product, 'apply', 'POST', { id: res.id });
+      toast(opts.appliedToast ? opts.appliedToast(name) : '已导入并切换到「' + name + '」');
+      await (opts.reloadAfter || loadState)();
+    } else {
+      toast(opts.importedToast ? opts.importedToast(name) : '已导入预设「' + name + '」');
+      await (opts.reloadAfter || (() => loadConfigList(product)))();
+    }
+  } catch (e) {
+    toast('导入失败：' + e.message + '（请确认是有效的配置 JSON）', 'error');
+  }
+}
+
+async function createConfigFromForm(product, collectConfig, options) {
+  const opts = options || {};
+  const name = prompt(opts.prompt || '新配置名称：', opts.defaultName || '新中转配置');
+  if (name === null) return;
+  try {
+    const config = collectConfig();
+    if (opts.applyAfterCreate === false) {
+      await configApi(product, 'create', 'POST', { name, config });
+      toast(opts.createdToast ? opts.createdToast(name) : '已创建预设「' + name + '」');
+      await (opts.reloadAfter || (() => loadConfigList(product)))();
+      return;
+    }
+    const res = await createAndApplyConfig(product, name, config);
+    toast(opts.appliedToast ? opts.appliedToast(name, res) : '已创建并切换到「' + name + '」，并写入实际配置');
+    await (opts.reloadAfter || loadState)();
+  } catch (e) {
+    toast('创建失败：' + e.message, 'error');
+  }
+}
+
+let cdConfigList = [];
+
+async function loadCDConfigs() {
+  return loadConfigList('claude-desktop');
+}
+
+async function switchCDConfig() {
+  await applySelectedConfig('claude-desktop', '已切换生效配置，正在加载…');
+}
+
+function collectCDConfig() {
+  return {
+    baseUrl: getVal('cd-base-url'),
+    apiKey: getVal('cd-api-key'),
+    authScheme: getVal('cd-auth-scheme'),
+    provider: getVal('cd-provider') || 'gateway',
+    egressHosts: getVal('cd-egress') || '*',
+    models: collectCDModels(),
+  };
+}
+
+async function newCDConfig() {
+  await createConfigFromForm('claude-desktop', collectCDConfig, {
+    reloadAfter: loadState,
+  });
+}
+
+async function renameCDConfigUI() {
+  await renameSelectedConfig('claude-desktop', loadCDConfigs);
+}
+
+async function deleteCDConfigUI() {
+  await deleteSelectedConfig('claude-desktop', loadState);
+}
+
+function exportCDConfigUI() {
+  exportSelectedConfig('claude-desktop');
+}
+
+async function importCDConfigUI(event) {
+  await importConfigFile(event, 'claude-desktop', { applyAfterImport: true, reloadAfter: loadState });
 }
 
 // ========== Claude Code CLI 多套配置管理 ==========
@@ -3119,111 +3519,40 @@ function collectCXDConfig() {
 }
 
 async function loadCCConfigs() {
-  try {
-    const data = await api('/api/claude-code/configs', 'GET');
-    ccConfigList = data.configs || [];
-    const sel = document.getElementById('cc-config-select');
-    if (!sel) return;
-    if (ccConfigList.length === 0) {
-      sel.innerHTML = '<option value="">（无预设，点「新建」把当前表单存为一套）</option>';
-      return;
-    }
-    sel.innerHTML = ccConfigList.map(c =>
-      `<option value="${esc(c.id)}" ${c.applied ? 'selected' : ''}>${esc(c.name)}${c.applied ? '（生效中）' : ''} — ${esc(c.baseUrl || '未设地址')}</option>`
-    ).join('');
-  } catch (e) { /* 读取失败时静默 */ }
+  return loadConfigList('claude-code');
 }
 
 async function switchCCConfig() {
-  const id = getVal('cc-config-select');
-  if (!id) return;
-  try {
-    await api('/api/claude-code/config/apply', 'POST', { id });
-    toast('已切换并写入 settings.json，新开的 Claude Code 会话即生效；下方表单会随之加载对应配置');
-    await loadState();   // 重载表单为新生效配置
-  } catch (e) { toast('切换失败：' + e.message, 'error'); }
+  await applySelectedConfig('claude-code', '已切换并写入 settings.json，新开的 Claude Code 会话即生效；下方表单会随之加载对应配置');
 }
 
 async function newCCConfig() {
-  const name = prompt('新配置名称：', '新中转配置');
-  if (name === null) return;
-  try {
-    // 用当前表单内容作为新预设初值，方便“复制一份再改”。
-    const res = await api('/api/claude-code/config/create', 'POST', { name, config: collectCCConfig() });
-    await api('/api/claude-code/config/apply', 'POST', { id: res.id });
-    toast('已创建并切换到「' + name + '」，并写入实际配置');
-    await loadState();
-  } catch (e) { toast('创建失败：' + e.message, 'error'); }
+  await createConfigFromForm('claude-code', collectCCConfig, {
+    reloadAfter: loadState,
+  });
 }
 
 async function renameCCConfigUI() {
-  const id = getVal('cc-config-select');
-  if (!id) { toast('请先选择一个配置', 'error'); return; }
-  const cur = ccConfigList.find(c => c.id === id);
-  const name = prompt('重命名配置：', cur ? cur.name : '');
-  if (name === null || !name.trim()) return;
-  try {
-    await api('/api/claude-code/config/rename', 'POST', { id, name: name.trim() });
-    toast('已重命名'); await loadCCConfigs();
-  } catch (e) { toast('重命名失败：' + e.message, 'error'); }
+  await renameSelectedConfig('claude-code', loadCCConfigs);
 }
 
 async function deleteCCConfigUI() {
-  const id = getVal('cc-config-select');
-  if (!id) { toast('请先选择一个配置', 'error'); return; }
-  const cur = ccConfigList.find(c => c.id === id);
-  if (!confirm('确定删除配置「' + (cur ? cur.name : id) + '」？\n（仅从预设清单移除，不改动当前 settings.json）')) return;
-  try {
-    await api('/api/claude-code/config/delete', 'POST', { id });
-    toast('已删除'); await loadCCConfigs();
-  } catch (e) { toast('删除失败：' + e.message, 'error'); }
+  await deleteSelectedConfig('claude-code', loadCCConfigs);
 }
 
 function exportCCConfigUI() {
-  const id = getVal('cc-config-select');
-  if (!id) { toast('请先选择一个配置', 'error'); return; }
-  // 「确定」=含密钥（完整备份），「取消」=不含密钥（可安全分享）。
-  const choice = confirm('导出是否包含 API Key？\n\n点「确定」= 含密钥（完整备份，请勿外传）\n点「取消」= 不含密钥（可安全分享）');
-  const stripKey = choice ? '' : '&stripKey=1';
-  window.location.href = '/api/claude-code/config/export?id=' + encodeURIComponent(id) + stripKey;
-  toast(choice ? '正在导出（含密钥）' : '正在导出（已去除密钥）');
+  exportSelectedConfig('claude-code');
 }
 
 async function importCCConfigUI(event) {
-  const file = event.target.files && event.target.files[0];
-  event.target.value = '';   // 允许重复选同一文件
-  if (!file) return;
-  try {
-    const text = await file.text();
-    const parsed = JSON.parse(text);
-    // 兼容 {name, config:{...}} 或直接 config 对象
-    const config = parsed.config || parsed;
-    const name = parsed.name || file.name.replace(/\.json$/i, '') || '导入配置';
-    const res = await api('/api/claude-code/config/import', 'POST', { name, config });
-    await api('/api/claude-code/config/apply', 'POST', { id: res.id });
-    toast('已导入并切换到「' + name + '」');
-    await loadState();
-  } catch (e) { toast('导入失败：' + e.message + '（请确认是有效的配置 JSON）', 'error'); }
+  await importConfigFile(event, 'claude-code', { applyAfterImport: true, reloadAfter: loadState });
 }
 
 // ===== CODEX CLI 多配置管理 =====
 let cxConfigList = [];
 
 async function loadCXConfigs() {
-  try {
-    const data = await api('/api/codex-cli/config/list', 'GET');
-    cxConfigList = data.configs || [];
-    renderCXEffectiveStatus(data);
-    const sel = document.getElementById('cx-config-select');
-    if (!sel) return;
-    if (cxConfigList.length === 0) {
-      sel.innerHTML = '<option value="">（无预设，点「新建」把当前表单存为一套）</option>';
-      return;
-    }
-    sel.innerHTML = cxConfigList.map(c =>
-      `<option value="${esc(c.id)}" ${c.applied ? 'selected' : ''}>${esc(c.name)}${c.applied ? '（生效中）' : ''}${c.unsupported ? '（不支持 chat）' : ''} — ${esc(c.baseUrl || '未设地址')}</option>`
-    ).join('');
-  } catch (e) { /* 读取失败时静默 */ }
+  return loadConfigList('codex-cli');
 }
 
 function renderCXEffectiveStatus(data) {
@@ -3247,13 +3576,7 @@ function renderCXEffectiveStatus(data) {
 }
 
 async function applySelectedCXConfig() {
-  const id = getVal('cx-config-select');
-  if (!id) return;
-  try {
-    await api('/api/codex-cli/config/apply', 'POST', { id });
-    toast('已切换并写入 config.toml，新开的 Codex CLI 会话即生效；下方表单会随之加载对应配置');
-    await loadState();
-  } catch (e) { toast('切换失败：' + e.message, 'error'); }
+  await applySelectedConfig('codex-cli', '已切换并写入 config.toml，新开的 Codex CLI 会话即生效；下方表单会随之加载对应配置');
 }
 
 async function switchCXConfig() {
@@ -3262,150 +3585,71 @@ async function switchCXConfig() {
 
 // 保守策略：新建只创建预设，不覆写 config.toml（与 Claude Code 版差异）
 async function newCXConfig() {
-  const name = prompt('新配置名称：', '新中转配置');
-  if (name === null) return;
-  try {
-    (await api('/api/codex-cli/config/create', 'POST', { name, config: collectCXConfig() }));
-    toast('已创建预设「' + name + '」（未覆盖当前生效的 config.toml，需下拉切换才会写入）');
-    await loadCXConfigs();
-  } catch (e) { toast('创建失败：' + e.message, 'error'); }
+  await createConfigFromForm('codex-cli', collectCXConfig, {
+    applyAfterCreate: false,
+    reloadAfter: loadCXConfigs,
+    createdToast: name => '已创建预设「' + name + '」（未覆盖当前生效的 config.toml，需下拉切换才会写入）',
+  });
 }
 
 async function renameCXConfigUI() {
-  const id = getVal('cx-config-select');
-  if (!id) { toast('请先选择一个配置', 'error'); return; }
-  const cur = cxConfigList.find(c => c.id === id);
-  const name = prompt('重命名配置：', cur ? cur.name : '');
-  if (name === null || !name.trim()) return;
-  try {
-    await api('/api/codex-cli/config/rename', 'POST', { id, name: name.trim() });
-    toast('已重命名'); await loadCXConfigs();
-  } catch (e) { toast('重命名失败：' + e.message, 'error'); }
+  await renameSelectedConfig('codex-cli', loadCXConfigs);
 }
 
 async function deleteCXConfigUI() {
-  const id = getVal('cx-config-select');
-  if (!id) { toast('请先选择一个配置', 'error'); return; }
-  const cur = cxConfigList.find(c => c.id === id);
-  if (!confirm('确定删除配置「' + (cur ? cur.name : id) + '」？\n（仅从预设清单移除，不改动当前 config.toml）')) return;
-  try {
-    await api('/api/codex-cli/config/delete', 'POST', { id });
-    toast('已删除'); await loadCXConfigs();
-  } catch (e) { toast('删除失败：' + e.message, 'error'); }
+  await deleteSelectedConfig('codex-cli', loadCXConfigs);
 }
 
 function exportCXConfigUI() {
-  const id = getVal('cx-config-select');
-  if (!id) { toast('请先选择一个配置', 'error'); return; }
-  const choice = confirm('导出是否包含 API Key？\n\n点「确定」= 含密钥（完整备份，请勿外传）\n点「取消」= 不含密钥（可安全分享）');
-  const stripKey = choice ? '' : '&stripKey=1';
-  window.location.href = '/api/codex-cli/config/export?id=' + encodeURIComponent(id) + stripKey;
-  toast(choice ? '正在导出（含密钥）' : '正在导出（已去除密钥）');
+  exportSelectedConfig('codex-cli');
 }
 
 // 保守策略：导入只创建预设，不覆写 config.toml（与 Claude Code 版差异）
 async function importCXConfigUI(event) {
-  const file = event.target.files && event.target.files[0];
-  event.target.value = '';
-  if (!file) return;
-  try {
-    const text = await file.text();
-    const parsed = JSON.parse(text);
-    const config = parsed.config || parsed;
-    const name = parsed.name || file.name.replace(/\.json$/i, '') || '导入配置';
-    await api('/api/codex-cli/config/import', 'POST', { name, config });
-    toast('已导入预设「' + name + '」（未覆盖当前生效的 config.toml，需下拉切换才会写入）');
-    await loadCXConfigs();
-  } catch (e) { toast('导入失败：' + e.message + '（请确认是有效的配置 JSON）', 'error'); }
+  await importConfigFile(event, 'codex-cli', {
+    applyAfterImport: false,
+    reloadAfter: loadCXConfigs,
+    importedToast: name => '已导入预设「' + name + '」（未覆盖当前生效的 config.toml，需下拉切换才会写入）',
+  });
 }
 
 // ===== CODEX DESKTOP 多配置管理 =====
 let cxdConfigList = [];
 
 async function loadCXDConfigs() {
-  try {
-    const data = await api('/api/codex-desktop/config/list', 'GET');
-    cxdConfigList = data.configs || [];
-    const sel = document.getElementById('cxd-config-select');
-    if (!sel) return;
-    if (cxdConfigList.length === 0) {
-      sel.innerHTML = '<option value="">（无预设，点「新建」把当前表单存为一套）</option>';
-      return;
-    }
-    sel.innerHTML = cxdConfigList.map(c =>
-      `<option value="${esc(c.id)}" ${c.applied ? 'selected' : ''}>${esc(c.name)}${c.applied ? '（生效中）' : ''} — ${esc(c.baseUrl || c.injectedBaseUrl || '未设地址')}</option>`
-    ).join('');
-  } catch (e) { /* 读取失败时静默 */ }
+  return loadConfigList('codex-desktop');
 }
 
 async function switchCXDConfig() {
-  const id = getVal('cxd-config-select');
-  if (!id) return;
-  try {
-    await api('/api/codex-desktop/config/apply', 'POST', { id });
-    toast('已切换并写入 config.json + codex.json，重启 Codex Desktop 后生效');
-    await loadState();
-  } catch (e) { toast('切换失败：' + e.message, 'error'); }
+  await applySelectedConfig('codex-desktop', '已切换并写入 config.json + codex.json，重启 Codex Desktop 后生效');
 }
 
 async function newCXDConfig() {
-  const name = prompt('新配置名称：', '新中转配置');
-  if (name === null) return;
-  try {
-    const res = await api('/api/codex-desktop/config/create', 'POST', { name, config: collectCXDConfig() });
-    await api('/api/codex-desktop/config/apply', 'POST', { id: res.id });
-    toast('已创建并切换到「' + name + '」，已写入 config.json + codex.json');
-    await loadState();
-  } catch (e) { toast('创建失败：' + e.message, 'error'); }
+  await createConfigFromForm('codex-desktop', collectCXDConfig, {
+    reloadAfter: loadState,
+    appliedToast: name => '已创建并切换到「' + name + '」，已写入 config.json + codex.json',
+  });
 }
 
 async function renameCXDConfigUI() {
-  const id = getVal('cxd-config-select');
-  if (!id) { toast('请先选择一个配置', 'error'); return; }
-  const cur = cxdConfigList.find(c => c.id === id);
-  const name = prompt('重命名配置：', cur ? cur.name : '');
-  if (name === null || !name.trim()) return;
-  try {
-    await api('/api/codex-desktop/config/rename', 'POST', { id, name: name.trim() });
-    toast('已重命名'); await loadCXDConfigs();
-  } catch (e) { toast('重命名失败：' + e.message, 'error'); }
+  await renameSelectedConfig('codex-desktop', loadCXDConfigs);
 }
 
 async function deleteCXDConfigUI() {
-  const id = getVal('cxd-config-select');
-  if (!id) { toast('请先选择一个配置', 'error'); return; }
-  const cur = cxdConfigList.find(c => c.id === id);
-  if (!confirm('确定删除配置「' + (cur ? cur.name : id) + '」？\n（仅从预设清单移除，不改动当前配置文件）')) return;
-  try {
-    await api('/api/codex-desktop/config/delete', 'POST', { id });
-    toast('已删除'); await loadCXDConfigs();
-  } catch (e) { toast('删除失败：' + e.message, 'error'); }
+  await deleteSelectedConfig('codex-desktop', loadCXDConfigs);
 }
 
 function exportCXDConfigUI() {
-  const id = getVal('cxd-config-select');
-  if (!id) { toast('请先选择一个配置', 'error'); return; }
-  const choice = confirm('导出是否包含 API Key？\n\n点「确定」= 含密钥（完整备份，请勿外传）\n点「取消」= 不含密钥（可安全分享）');
-  const stripKey = choice ? '' : '&stripKey=1';
-  window.location.href = '/api/codex-desktop/config/export?id=' + encodeURIComponent(id) + stripKey;
-  toast(choice ? '正在导出（含密钥）' : '正在导出（已去除密钥）');
+  exportSelectedConfig('codex-desktop');
 }
 
 // 导入后自动应用（Codex Desktop 无保守策略，因为 config.json 结构复杂直接应用更安全）
 async function importCXDConfigUI(event) {
-  const file = event.target.files && event.target.files[0];
-  event.target.value = '';
-  if (!file) return;
-  try {
-    const text = await file.text();
-    const parsed = JSON.parse(text);
-    const config = parsed.config || parsed;
-    const name = parsed.name || file.name.replace(/\.json$/i, '') || '导入配置';
-    const res = await api('/api/codex-desktop/config/import', 'POST', { name, config });
-    await api('/api/codex-desktop/config/apply', 'POST', { id: res.id });
-    toast('已导入并切换到「' + name + '」，已写入 config.json + codex.json');
-    await loadState();
-  } catch (e) { toast('导入失败：' + e.message + '（请确认是有效的配置 JSON）', 'error'); }
+  await importConfigFile(event, 'codex-desktop', {
+    applyAfterImport: true,
+    reloadAfter: loadState,
+    appliedToast: name => '已导入并切换到「' + name + '」，已写入 config.json + codex.json',
+  });
 }
 
 // 网关思考兜底：仅「补全」模式显示预算输入
@@ -3424,9 +3668,17 @@ function collectNetHeaders(){document.querySelectorAll('#net-headers-list input[
 function addNetHeader(){collectNetHeaders();netHeaders.push({k:'',v:''});renderNetHeaders();}
 function removeNetHeader(i){collectNetHeaders();netHeaders.splice(i,1);renderNetHeaders();}
 async function syncGatewayModels(){var out=document.getElementById('gw-models-sync');out.innerHTML='<span class="loading"></span> 正在从网关上游同步…';try{var params=new URLSearchParams();var u=getVal('gw-upstream-url'),k=getVal('gw-upstream-key');if(u)params.set('baseUrl',u);if(k)params.set('apiKey',k);var d=await api('/api/gateway/models?'+params.toString(),'GET');if(d.success&&d.models&&d.models.length){var ids=d.models.map(function(m){return m.id;});var dl=document.getElementById('gw-backend-datalist');if(dl)dl.innerHTML=ids.map(function(id){return '<option value="'+esc(String(id))+'">';}).join('');out.innerHTML='<span style="color:var(--green);">&#x2705; 已探测到 '+ids.length+' 个模型</span> <span class="mono" style="color:var(--text2);">'+ids.slice(0,8).map(esc).join(', ')+(ids.length>8?'…':'')+'</span>';toast('已同步 '+ids.length+' 个模型，可在右栏下拉选择');}else{out.innerHTML='<span style="color:var(--red);">&#x274c; '+esc(d.error||'未获取到模型列表')+'</span>';toast(d.error||'未获取到模型列表','error');}}catch(e){out.innerHTML='<span style="color:var(--red);">&#x274c; '+esc(e.message)+'</span>';}}
-async function refreshProcIndicator(){try{var s=await api('/api/process/status?product=claude-desktop','GET');var dot=document.getElementById('proc-dot');var txt=document.getElementById('proc-text');if(dot)dot.className=s.running?'on':'';if(txt)txt.textContent=s.running?('Claude Desktop 运行中 (PID '+s.pid+')'):'Claude Desktop 未运行';}catch(e){var t=document.getElementById('proc-text');if(t)t.textContent='状态未知';}}
-var procRestarting=false;
-async function restartProcessQuick(){if(procRestarting)return;procRestarting=true;var txt=document.getElementById('proc-text');if(txt)txt.textContent='重启中…';var ind=document.getElementById('proc-indicator');if(ind)ind.style.pointerEvents='none';try{var r=await api('/api/process/restart','POST',{product:'claude-desktop'});if(r.success)toast(r.relaunched?('Claude Desktop 已重启 (PID '+r.pid+')'):(r.warning||'已关闭，请手动重开'),r.relaunched?'success':'error');else toast(r.error||'重启失败','error');}catch(e){toast('重启失败: '+e.message,'error');}setTimeout(function(){procRestarting=false;if(ind)ind.style.pointerEvents='';refreshProcIndicator();},2200);}
+function procMeta(product){var map={'claude-desktop':'Claude Desktop','codex-desktop':'Codex Desktop','proxy':'Clash Verge'};return map[product]||product;}
+function formatProcRefreshTime(value){var d=value instanceof Date?value:new Date(value||Date.now());if(isNaN(d.getTime()))return'未知';return d.toLocaleString();}
+function procPortsText(s){var ports=s&&Array.isArray(s.ports)?s.ports.slice():(s&&s.port?[s.port]:[]);ports=ports.filter(function(p){return p!==''&&p!==null&&p!==undefined;});return ports.length?ports.join(', '):'无';}
+function buildProcTooltip(product,s){var name=procMeta(product);var data=s||{};var processName=data.processName||data.name||data.matchedName||'未识别';var pid=data.pid||'无';var ports=procPortsText(data);var lastRefresh=formatProcRefreshTime(data.lastRefresh||data.checkedAt);return name+' 状态\n进程名：'+processName+'\nPID：'+pid+'\n端口：'+ports+'\n最后刷新：'+lastRefresh+'\n点击后会先弹出确认，再执行重启/启动';}
+function setProcChip(product,state,text,status){var chip=document.querySelector('[data-proc-product="'+product+'"]');if(!chip)return;chip.classList.remove('state-running','state-stopped','state-unknown');chip.classList.add('state-'+state);var label=chip.querySelector('.proc-text');if(label)label.textContent=text;chip.title=typeof status==='string'?status:buildProcTooltip(product,status||{});}
+function renderDesktopProcStatus(product,s,lastRefresh){var name=procMeta(product);var data=s||{};data.lastRefresh=lastRefresh||data.checkedAt||new Date();if(data&&data.running){setProcChip(product,'running',name+' 运行中',data);}else{setProcChip(product,'stopped',name+' 未运行',data);}}
+function renderProxyProcStatus(s,lastRefresh){var data=s||{};data.lastRefresh=lastRefresh||data.checkedAt||new Date();var running=!!(data&&(data.processRunning||data.portListening||data.running));var port=data&&data.port?data.port:'';var suffix=port?(':'+port):'';var listen=data&&data.portListening?' 监听中':'';setProcChip('proxy',running?'running':'stopped',running?('Clash 运行中'+suffix+listen):'Clash 未运行',data);}
+async function refreshProcIndicator(){var lastRefresh=new Date();try{var cd=await api('/api/process/status?product=claude-desktop','GET');renderDesktopProcStatus('claude-desktop',cd,lastRefresh);}catch(e){setProcChip('claude-desktop','unknown','Claude Desktop 状态未知',{processName:'状态未知',pid:null,ports:[],lastRefresh:lastRefresh});}try{var cxd=await api('/api/process/status?product=codex-desktop','GET');renderDesktopProcStatus('codex-desktop',cxd,lastRefresh);}catch(e){setProcChip('codex-desktop','unknown','Codex Desktop 状态未知',{processName:'状态未知',pid:null,ports:[],lastRefresh:lastRefresh});}try{var px=await api('/api/proxy/status','GET');renderProxyProcStatus(px,lastRefresh);}catch(e){setProcChip('proxy','unknown','Clash 状态未知',{processName:'状态未知',pid:null,ports:[],lastRefresh:lastRefresh});}}
+function confirmRestartProcess(product){var name=procMeta(product);if(!confirm('确认重启/启动 '+name+'？\n这会关闭当前客户端进程并尝试重新启动。'))return;restartProcessQuick(product);}
+var procRestartingProduct='';
+async function restartProcessQuick(product){if(procRestartingProduct)return;procRestartingProduct=product;var name=procMeta(product);var chip=document.querySelector('[data-proc-product="'+product+'"]');var label=chip?chip.querySelector('.proc-text'):null;if(label)label.textContent=name+' 重启中…';if(chip)chip.disabled=true;try{var r=await api('/api/process/restart','POST',{product:product});if(r.success)toast(r.relaunched?(name+' 已重启 (PID '+r.pid+')'):(r.warning||name+' 已关闭，请手动重开'),r.relaunched?'success':'error');else toast(r.error||name+' 重启失败','error');}catch(e){toast(name+' 重启失败: '+e.message,'error');}setTimeout(function(){procRestartingProduct='';if(chip)chip.disabled=false;refreshProcIndicator();},2200);}
 var logPanelOpen=false;
 function toggleLogPanel(ev){if(ev)ev.stopPropagation();logPanelOpen=!logPanelOpen;document.getElementById('logpanel').classList.toggle('open',logPanelOpen);document.getElementById('log-chev').innerHTML=logPanelOpen?'&#x25bc;':'&#x25b2;';if(logPanelOpen)pollLogs();}
 async function pollLogs(){if(!logPanelOpen)return;try{var d=await api('/api/logs','GET');var logs=d.logs||[];document.getElementById('log-count').textContent='('+logs.length+'/'+(d.max||500)+')';var b=document.getElementById('log-body');b.innerHTML=logs.slice().reverse().map(function(l){var st=(l.status===''||l.status==null)?'':l.status;var cls=st>=400?'st-err':(st>=200&&st<300?'st-ok':(st===0?'st-warn':''));var t=(l.timestamp||'').replace('T',' ').replace(/\..*/,'');return '<div class="log-line">'+esc(t)+' <b>'+esc(l.method||'')+'</b> '+esc(l.url||'')+' <span class="'+cls+'">'+esc(String(st))+'</span> '+((l.duration_ms!==''&&l.duration_ms!=null)?esc(l.duration_ms)+'ms':'')+(l.model?' ['+esc(l.model)+((l.mappedTo&&l.mappedTo!==l.model)?'&#x2192;'+esc(l.mappedTo):'')+']':'')+(l.error_message?' <span class="st-err">'+esc(l.error_message)+'</span>':'')+'</div>';}).join('')||'<div style="color:var(--text2);padding:8px;">暂无日志</div>';}catch(e){}}
@@ -3437,12 +3689,15 @@ async function openHistory(product){histProduct=product;document.getElementById(
 function closeHistory(){document.getElementById('hist-modal').style.display='none';}
 async function doRollback(filename){if(!confirm('确定回滚到「'+filename+'」？\n当前配置会先自动备份，随后写入该版本并重启对应客户端。'))return;try{var r=await api('/api/config/rollback','POST',{product:histProduct,filename:filename});if(r.success){toast('已回滚到 '+filename+((r.restart&&r.restart.relaunched)?'，客户端已重启':''));closeHistory();loadState();}else{toast(r.error||'回滚失败','error');}}catch(e){toast('回滚失败: '+e.message,'error');}}
 refreshProcIndicator();
+setInterval(refreshProcIndicator, 10000);
 setInterval(function(){if(logPanelOpen)pollLogs();},2000);
-setInterval(refreshProcIndicator,8000);
 
-// ===== 主题切换（经典蓝 / 深色仪表板）=====
-function setTheme(name){var valid=['classic','dashboard','modern','light'];if(valid.indexOf(name)<0)name='classic';document.body.setAttribute('data-theme',name);var sel=document.getElementById('theme-select');if(sel)sel.value=name;currentUiSettings.theme=name;saveUiSettings();}
-function setSidebarLayout(name){var valid=['classic','compact','sidebar'];if(valid.indexOf(name)<0)name='classic';document.body.setAttribute('data-sidebar-layout',name);var sel=document.getElementById('sidebar-layout-select');if(sel)sel.value=name;currentUiSettings.sidebarLayout=name;saveUiSettings();}
+// ===== 主题与边栏布局切换 =====
+function normalizeTheme(name){var valid=['classic','dashboard','modern','light'];return valid.indexOf(name)<0?'classic':name;}
+function normalizeSidebarLayout(name){var valid=['classic','compact','sidebar'];return valid.indexOf(name)<0?'classic':name;}
+function applyTheme(name){name=normalizeTheme(name);document.body.setAttribute('data-theme',name);var sel=document.getElementById('theme-select');if(sel)sel.value=name;}
+function setTheme(name){name=normalizeTheme(name);applyTheme(name);currentUiSettings.theme=name;if(uiSettingsReady)saveUiSettings();}
+function setSidebarLayout(name){name=normalizeSidebarLayout(name);applySidebarLayout(name);currentUiSettings.sidebarLayout=name;if(uiSettingsReady)saveUiSettings();}
 function applySidebarLayout(name){var valid=['classic','compact','sidebar'];if(valid.indexOf(name)<0)name='classic';document.body.setAttribute('data-sidebar-layout',name);var sel=document.getElementById('sidebar-layout-select');if(sel)sel.value=name;}
 async function saveUiSettings() {
   try {

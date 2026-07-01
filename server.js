@@ -131,6 +131,14 @@ const APPS = IS_WIN ? {
   'codex-desktop': {
     name: 'Codex Desktop',
     processes: ['ccx-desktop.exe'],
+    stopProcesses: [
+      'ccx-desktop.exe',
+      { name: 'Codex.exe', pathIncludes: ['\\WindowsApps\\OpenAI.Codex_', '\\app\\Codex.exe'] },
+    ],
+    detectProcesses: [
+      'ccx-desktop.exe',
+      { name: 'Codex.exe', pathIncludes: ['\\WindowsApps\\OpenAI.Codex_', '\\app\\Codex.exe'] },
+    ],
     exe: detectExe([
       'G:\\Program Files\\CCX\\CCX Desktop\\ccx-desktop.exe',
       path.join(process.env['ProgramFiles'] || 'C:\\Program Files', 'CCX', 'CCX Desktop', 'ccx-desktop.exe'),
@@ -183,10 +191,76 @@ function applyPathsConfig() {
 }
 applyPathsConfig();
 
+function uniqueNonEmpty(values) {
+  return Array.from(new Set((values || []).map(v => String(v || '').trim()).filter(Boolean)));
+}
+
+function processCandidateName(candidate) {
+  if (!candidate) return '';
+  return typeof candidate === 'string' ? candidate : String(candidate.name || '').trim();
+}
+
+function uniqueProcessCandidates(values) {
+  const seen = new Set();
+  const out = [];
+  for (const candidate of values || []) {
+    const name = processCandidateName(candidate);
+    if (!name) continue;
+    const key = typeof candidate === 'string'
+      ? 'name:' + name.toLowerCase()
+      : JSON.stringify({
+        name: name.toLowerCase(),
+        pathIncludes: (candidate.pathIncludes || []).map(v => String(v || '').toLowerCase()),
+      });
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(candidate);
+  }
+  return out;
+}
+
+function appProcessCandidates(app) {
+  const names = app && Array.isArray(app.detectProcesses)
+    ? app.detectProcesses.slice()
+    : (app && Array.isArray(app.processes) ? app.processes.slice() : []);
+  if (app && app.exe) names.push(path.basename(app.exe));
+  return uniqueProcessCandidates(names);
+}
+
+function appProcessNames(app) {
+  return uniqueNonEmpty(appProcessCandidates(app).map(processCandidateName));
+}
+
+function appRestartProcessCandidates(app) {
+  const names = app && Array.isArray(app.stopProcesses)
+    ? app.stopProcesses.slice()
+    : (app && Array.isArray(app.processes) ? app.processes.slice() : []);
+  if (app && app.exe) names.push(path.basename(app.exe));
+  return uniqueProcessCandidates(names);
+}
+
+function appRestartProcessNames(app) {
+  return uniqueNonEmpty(appRestartProcessCandidates(app).map(processCandidateName));
+}
+
 function getAppsInfo() {
-  return Object.fromEntries(Object.entries(APPS).map(([k, v]) => [k, {
-    name: v.name, exe: v.exe || '', customPath: v.customPath || '', processes: v.processes,
-  }]));
+  return Object.fromEntries(Object.entries(APPS).map(([k, v]) => {
+    let detectedFromProcess = '';
+    let runningPid = null;
+    try {
+      const status = getProcessStatus(k);
+      detectedFromProcess = status.executablePath || '';
+      runningPid = status.pid || null;
+    } catch (e) {}
+    return [k, {
+      name: v.name,
+      exe: v.exe || '',
+      customPath: v.customPath || '',
+      detectedFromProcess,
+      runningPid,
+      processes: appProcessNames(v),
+    }];
+  }));
 }
 
 // ========== AUTO-START ON BOOT ==========
@@ -276,6 +350,17 @@ function readJSON(filePath) {
   } catch (e) {
     if (e.code === 'ENOENT') return null;
     throw e;
+  }
+}
+
+function readStatePart(name, reader, fallback, errors) {
+  try {
+    return reader();
+  } catch (e) {
+    const message = e && e.message ? e.message : String(e);
+    errors.push({ name, error: message });
+    console.error(`读取 ${name} 配置失败: ${message}`);
+    return fallback;
   }
 }
 
@@ -1422,14 +1507,105 @@ const CC_CONFIGS_PATH = path.join(__dirname, 'cc-configs.json');
 const CODEX_CONFIGS_PATH = PATHS.codexCliStore;
 const CXD_CONFIGS_PATH = PATHS.codexDesktopStore;
 
+function createJsonConfigStore(storePath) {
+  function read() {
+    const obj = readJSON(storePath);
+    if (!obj || !Array.isArray(obj.entries)) return { appliedId: '', entries: [] };
+    return {
+      appliedId: obj.appliedId || '',
+      entries: obj.entries.filter(e => e && typeof e === 'object'),
+    };
+  }
+
+  async function write(store) {
+    const safeStore = {
+      appliedId: store && store.appliedId ? String(store.appliedId) : '',
+      entries: Array.isArray(store && store.entries) ? store.entries : [],
+    };
+    await backupFile(storePath);
+    await atomicWrite(storePath, JSON.stringify(safeStore, null, 2) + '\n');
+  }
+
+  function requireEntry(store, id) {
+    const targetId = String(id || '').trim();
+    const entry = (store.entries || []).find(e => e.id === targetId);
+    if (!entry) throw new Error('配置不存在: ' + targetId);
+    return entry;
+  }
+
+  function configName(name, fallback) {
+    const value = String(name || '').trim();
+    return value || fallback || '新配置';
+  }
+
+  async function create(name, config, fallbackName) {
+    const store = read();
+    const id = require('crypto').randomUUID();
+    store.entries.push({ id, name: configName(name, fallbackName), config });
+    if (!store.appliedId) store.appliedId = id;
+    await write(store);
+    return id;
+  }
+
+  async function apply(id, applyConfig, validateConfig) {
+    const store = read();
+    const entry = requireEntry(store, id);
+    if (validateConfig) validateConfig(entry.config || {});
+    store.appliedId = entry.id;
+    await write(store);
+    if (applyConfig) await applyConfig(entry.config || {});
+    return entry.id;
+  }
+
+  async function update(id, config, applyConfig) {
+    const store = read();
+    const entry = requireEntry(store, id);
+    entry.config = config;
+    await write(store);
+    if (store.appliedId === entry.id && applyConfig) {
+      await applyConfig(entry.config || {});
+    }
+    return entry.id;
+  }
+
+  async function remove(id) {
+    const store = read();
+    const targetId = String(id || '').trim();
+    store.entries = store.entries.filter(e => e.id !== targetId);
+    if (store.appliedId === targetId) store.appliedId = '';
+    await write(store);
+    return store.appliedId;
+  }
+
+  async function rename(id, name) {
+    const store = read();
+    const entry = requireEntry(store, id);
+    entry.name = configName(name, entry.name);
+    await write(store);
+  }
+
+  function exportConfig(id, options) {
+    const opts = options || {};
+    const store = read();
+    const targetId = String(id || '').trim();
+    const entry = store.entries.find(e => e.id === targetId);
+    const config = entry ? Object.assign({}, entry.config) : {};
+    if (opts.stripKey && typeof opts.redact === 'function') opts.redact(config);
+    return { name: entry ? entry.name : (opts.fallbackName || '导出配置'), config };
+  }
+
+  return { read, write, requireEntry, create, apply, update, remove, rename, exportConfig };
+}
+
+const CC_CONFIG_STORE = createJsonConfigStore(CC_CONFIGS_PATH);
+const CODEX_CONFIG_STORE = createJsonConfigStore(CODEX_CONFIGS_PATH);
+const CXD_CONFIG_STORE = createJsonConfigStore(CXD_CONFIGS_PATH);
+
 function readCCStore() {
-  const obj = readJSON(CC_CONFIGS_PATH);
-  if (!obj || !Array.isArray(obj.entries)) return { appliedId: '', entries: [] };
-  return { appliedId: obj.appliedId || '', entries: obj.entries };
+  return CC_CONFIG_STORE.read();
 }
 async function writeCCStore(store) {
-  await backupFile(CC_CONFIGS_PATH);
-  await atomicWrite(CC_CONFIGS_PATH, JSON.stringify(store, null, 2) + '\n');
+  await CC_CONFIG_STORE.write(store);
 }
 
 // 只保留 Claude Code 认得的字段，防止导入脏数据污染预设。
@@ -1467,61 +1643,33 @@ function listCCConfigs() {
 }
 
 async function createCCConfig(name, configData) {
-  const store = readCCStore();
-  const id = require('crypto').randomUUID();
-  store.entries.push({ id, name: name || '新配置', config: sanitizeCCConfig(configData) });
-  if (!store.appliedId) store.appliedId = id; // 第一份预设默认生效
-  await writeCCStore(store);
-  return id;
+  return CC_CONFIG_STORE.create(name, sanitizeCCConfig(configData), '新配置');
 }
 
 // 应用预设：标记 appliedId 并把内容写入 Claude Code 实际读取的 settings.json。
 async function applyCCConfig(id) {
-  const store = readCCStore();
-  const e = store.entries.find(x => x.id === id);
-  if (!e) throw new Error('配置不存在: ' + id);
-  store.appliedId = id;
-  await writeCCStore(store);
-  await writeClaudeCode(e.config || {}); // 沿用既有写入逻辑（含备份+跳过引导）
-  return id;
+  return CC_CONFIG_STORE.apply(id, writeClaudeCode);
 }
 
 // 更新预设内容（保存表单时让“生效中”的预设与 settings.json 保持一致）。
 async function updateCCConfig(id, configData) {
-  const store = readCCStore();
-  const e = store.entries.find(x => x.id === id);
-  if (!e) throw new Error('配置不存在: ' + id);
-  e.config = sanitizeCCConfig(configData);
-  await writeCCStore(store);
-  if (store.appliedId === id) {
-    await writeClaudeCode(e.config || {});
-  }
-  return id;
+  return CC_CONFIG_STORE.update(id, sanitizeCCConfig(configData), writeClaudeCode);
 }
 
 async function deleteCCConfig(id) {
-  const store = readCCStore();
-  store.entries = store.entries.filter(e => e.id !== id);
-  if (store.appliedId === id) store.appliedId = ''; // 删除生效预设后，无预设再与 settings.json 对应
-  await writeCCStore(store);
-  return store.appliedId;
+  return CC_CONFIG_STORE.remove(id);
 }
 
 async function renameCCConfig(id, name) {
-  const store = readCCStore();
-  const e = store.entries.find(x => x.id === id);
-  if (!e) throw new Error('配置不存在');
-  e.name = (name || '').trim() || e.name;
-  await writeCCStore(store);
+  await CC_CONFIG_STORE.rename(id, name);
 }
 
 function exportCCConfig(id, stripKey) {
-  const store = readCCStore();
-  const e = store.entries.find(x => x.id === id);
-  const config = e ? Object.assign({}, e.config) : {};
-  // 分享时可去除密钥，避免泄露。
-  if (stripKey) config.authToken = '';
-  return { name: e ? e.name : '导出配置', config };
+  return CC_CONFIG_STORE.exportConfig(id, {
+    stripKey,
+    fallbackName: '导出配置',
+    redact: config => { config.authToken = ''; },
+  });
 }
 
 // ========== CODEX CLI — 多套配置（预设）管理 ==========
@@ -1533,13 +1681,10 @@ function exportCCConfig(id, stripKey) {
 // 该文件含密钥，已 gitignore，禁止提交。CODEX_CONFIGS_PATH 已在上方定义。
 
 function readCodexStore() {
-  const obj = readJSON(CODEX_CONFIGS_PATH);
-  if (!obj || !Array.isArray(obj.entries)) return { appliedId: '', entries: [] };
-  return { appliedId: obj.appliedId || '', entries: obj.entries };
+  return CODEX_CONFIG_STORE.read();
 }
 async function writeCodexStore(store) {
-  await backupFile(CODEX_CONFIGS_PATH);
-  await atomicWrite(CODEX_CONFIGS_PATH, JSON.stringify(store, null, 2) + '\n');
+  await CODEX_CONFIG_STORE.write(store);
 }
 
 function sanitizeCodexConfig(d) {
@@ -1634,23 +1779,11 @@ function listCodexConfigs() {
 }
 
 async function createCodexConfig(name, configData) {
-  const store = readCodexStore();
-  const id = require('crypto').randomUUID();
-  store.entries.push({ id, name: name || '新配置', config: sanitizeCodexConfig(configData) });
-  if (!store.appliedId) store.appliedId = id;
-  await writeCodexStore(store);
-  return id;
+  return CODEX_CONFIG_STORE.create(name, sanitizeCodexConfig(configData), '新配置');
 }
 
 async function applyCodexConfig(id) {
-  const store = readCodexStore();
-  const e = store.entries.find(x => x.id === id);
-  if (!e) throw new Error('配置不存在: ' + id);
-  assertCodexCliConfigSupported(e.config || {});
-  store.appliedId = id;
-  await writeCodexStore(store);
-  await writeCodexCli(e.config || {});
-  return id;
+  return CODEX_CONFIG_STORE.apply(id, writeCodexCli, assertCodexCliConfigSupported);
 }
 
 async function saveAndApplyCodexConfig(configData, nameHint) {
@@ -1697,39 +1830,23 @@ async function upsertAndApplyCodexConfigByName(name, configData) {
 }
 
 async function updateCodexConfig(id, configData) {
-  const store = readCodexStore();
-  const e = store.entries.find(x => x.id === id);
-  if (!e) throw new Error('配置不存在: ' + id);
-  e.config = sanitizeCodexConfig(configData);
-  await writeCodexStore(store);
-  if (store.appliedId === id) {
-    await writeCodexCli(e.config || {});
-  }
-  return id;
+  return CODEX_CONFIG_STORE.update(id, sanitizeCodexConfig(configData), writeCodexCli);
 }
 
 async function deleteCodexConfig(id) {
-  const store = readCodexStore();
-  store.entries = store.entries.filter(e => e.id !== id);
-  if (store.appliedId === id) store.appliedId = '';
-  await writeCodexStore(store);
-  return store.appliedId;
+  return CODEX_CONFIG_STORE.remove(id);
 }
 
 async function renameCodexConfig(id, name) {
-  const store = readCodexStore();
-  const e = store.entries.find(x => x.id === id);
-  if (!e) throw new Error('配置不存在');
-  e.name = (name || '').trim() || e.name;
-  await writeCodexStore(store);
+  await CODEX_CONFIG_STORE.rename(id, name);
 }
 
 function exportCodexConfig(id, stripKey) {
-  const store = readCodexStore();
-  const e = store.entries.find(x => x.id === id);
-  const config = e ? Object.assign({}, e.config) : {};
-  if (stripKey) config.apiKey = '';
-  return { name: e ? e.name : '导出配置', config };
+  return CODEX_CONFIG_STORE.exportConfig(id, {
+    stripKey,
+    fallbackName: '导出配置',
+    redact: config => { config.apiKey = ''; },
+  });
 }
 
 // ========== CODEX DESKTOP — 多套配置（预设）管理 ==========
@@ -1738,13 +1855,10 @@ function exportCodexConfig(id, stripKey) {
 // 该文件含密钥，已 gitignore，禁止提交。CXD_CONFIGS_PATH 已在上方定义。
 
 function readCXDStore() {
-  const obj = readJSON(CXD_CONFIGS_PATH);
-  if (!obj || !Array.isArray(obj.entries)) return { appliedId: '', entries: [] };
-  return { appliedId: obj.appliedId || '', entries: obj.entries };
+  return CXD_CONFIG_STORE.read();
 }
 async function writeCXDStore(store) {
-  await backupFile(CXD_CONFIGS_PATH);
-  await atomicWrite(CXD_CONFIGS_PATH, JSON.stringify(store, null, 2) + '\n');
+  await CXD_CONFIG_STORE.write(store);
 }
 
 function sanitizeCXDConfig(d) {
@@ -1799,34 +1913,15 @@ function listCXDConfigs() {
 }
 
 async function createCXDConfig(name, configData) {
-  const store = readCXDStore();
-  const id = require('crypto').randomUUID();
-  store.entries.push({ id, name: name || '新配置', config: sanitizeCXDConfig(configData) });
-  if (!store.appliedId) store.appliedId = id;
-  await writeCXDStore(store);
-  return id;
+  return CXD_CONFIG_STORE.create(name, sanitizeCXDConfig(configData), '新配置');
 }
 
 async function applyCXDConfig(id) {
-  const store = readCXDStore();
-  const e = store.entries.find(x => x.id === id);
-  if (!e) throw new Error('配置不存在: ' + id);
-  store.appliedId = id;
-  await writeCXDStore(store);
-  await writeCodexDesktop(e.config || {});
-  return id;
+  return CXD_CONFIG_STORE.apply(id, writeCodexDesktop);
 }
 
 async function updateCXDConfig(id, configData) {
-  const store = readCXDStore();
-  const e = store.entries.find(x => x.id === id);
-  if (!e) throw new Error('配置不存在: ' + id);
-  e.config = sanitizeCXDConfig(configData);
-  await writeCXDStore(store);
-  if (store.appliedId === id) {
-    await writeCodexDesktop(e.config || {});
-  }
-  return id;
+  return CXD_CONFIG_STORE.update(id, sanitizeCXDConfig(configData), writeCodexDesktop);
 }
 
 async function saveAndApplyCXDConfig(configData, nameHint) {
@@ -1853,27 +1948,19 @@ async function saveAndApplyCXDConfig(configData, nameHint) {
 }
 
 async function deleteCXDConfig(id) {
-  const store = readCXDStore();
-  store.entries = store.entries.filter(e => e.id !== id);
-  if (store.appliedId === id) store.appliedId = '';
-  await writeCXDStore(store);
-  return store.appliedId;
+  return CXD_CONFIG_STORE.remove(id);
 }
 
 async function renameCXDConfig(id, name) {
-  const store = readCXDStore();
-  const e = store.entries.find(x => x.id === id);
-  if (!e) throw new Error('配置不存在');
-  e.name = (name || '').trim() || e.name;
-  await writeCXDStore(store);
+  await CXD_CONFIG_STORE.rename(id, name);
 }
 
 function exportCXDConfig(id, stripKey) {
-  const store = readCXDStore();
-  const e = store.entries.find(x => x.id === id);
-  const config = e ? Object.assign({}, e.config) : {};
-  if (stripKey) config.injectedApiKey = '';
-  return { name: e ? e.name : '导出配置', config };
+  return CXD_CONFIG_STORE.exportConfig(id, {
+    stripKey,
+    fallbackName: '导出配置',
+    redact: config => { config.injectedApiKey = ''; },
+  });
 }
 
 async function writeCodexCli(data) {
@@ -2120,13 +2207,25 @@ function isPortListening(port) {
 
 function checkProxyStatus() {
   const port = (readProxy()).proxyPort || '7897';
-  const names = APPS.proxy ? APPS.proxy.processes : (IS_WIN ? ['clash-verge.exe', 'verge-mihomo.exe'] : ['Clash Verge', 'verge-mihomo']);
-  let processRunning = false;
-  for (const name of names) {
-    if (isProcessRunning(name)) { processRunning = true; break; }
+  const candidates = APPS.proxy ? appProcessCandidates(APPS.proxy) : (IS_WIN ? ['clash-verge.exe', 'verge-mihomo.exe'] : ['Clash Verge', 'verge-mihomo']);
+  let processInfo = null;
+  for (const candidate of candidates) {
+    processInfo = findFirstProcess(candidate);
+    if (processInfo) break;
   }
   const portListening = isPortListening(port);
-  return { processRunning, portListening, port: parseInt(port) };
+  const configuredPort = parseInt(port, 10);
+  return {
+    processRunning: !!processInfo,
+    portListening,
+    port: configuredPort,
+    ports: uniqueNonEmpty([configuredPort].concat(processInfo ? listeningPortsForPid(processInfo.pid) : [])).map(Number).filter(Boolean),
+    pid: processInfo ? processInfo.pid : null,
+    processName: processInfo ? processInfo.processName : null,
+    matchedName: processInfo ? processInfo.matchedName : null,
+    processNames: uniqueNonEmpty(candidates.map(processCandidateName)),
+    checkedAt: new Date().toISOString(),
+  };
 }
 
 function startProxy() {
@@ -2139,7 +2238,7 @@ function startProxy() {
 
 function stopProxy() {
   const results = [];
-  const names = APPS.proxy ? APPS.proxy.processes : ['clash-verge.exe', 'verge-mihomo.exe', 'verge-mihomo-alpha.exe'];
+  const names = APPS.proxy ? appRestartProcessNames(APPS.proxy) : ['clash-verge.exe', 'verge-mihomo.exe', 'verge-mihomo-alpha.exe'];
   for (const name of names) {
     const ok = killProcessByName(name);
     results.push({ process: name, result: ok ? 'terminated' : 'not running' });
@@ -2150,69 +2249,7 @@ function stopProxy() {
 // ========== SYNC ALL LOGIC ==========
 
 async function syncAll(data) {
-  const sync = data.syncAll;
-  if (!sync || !sync.baseUrl) return [];
-
-  const baseUrl = sync.baseUrl;
-  const apiKey = sync.apiKey || '';
-  const backups = [];
-
-  // 中文注释：按产品开关执行同步，保持原有保存链路不变。
-  // 新增产品可在前端先回填字段，再复用这里的持久化写入逻辑。
-
-  // 1. Claude Code CLI
-  if (sync.claudeCode !== false) {
-    const ccData = readClaudeCode();
-    ccData.baseUrl = baseUrl;
-    ccData.authToken = apiKey;
-    const bp = await backupFile(PATHS.claudeCode);
-    if (bp) backups.push(bp);
-    await writeClaudeCode(ccData);
-  }
-
-  // 2. Claude Desktop 3P
-  if (sync.claudeDesktop !== false) {
-    const cdData = readClaudeDesktop();
-    if (cdData.configId) {
-      cdData.baseUrl = baseUrl;
-      cdData.apiKey = apiKey;
-      const bp = await writeClaudeDesktopPrep(cdData);
-      if (bp) backups.push(bp);
-    }
-  }
-
-  // 3. Codex CLI
-  if (sync.codexCli !== false) {
-    const cxData = readCodexCli();
-    cxData.baseUrl = baseUrl;
-    cxData.apiKey = apiKey;
-    await writeCodexCli(cxData);
-    // backup already done inside writeCodexCli
-    backups.push('codex-cli-config.toml');
-  }
-
-  // 4. Codex Desktop — update primary active upstream
-  if (sync.codexDesktop !== false) {
-    const config = readJSON(PATHS.codexDesktopConfig);
-    if (config) {
-      // Update first active responsesUpstream
-      const activeResp = (config.responsesUpstream || []).filter(e => e.status === 'active').sort((a, b) => (a.priority || 99) - (b.priority || 99));
-      if (activeResp.length > 0) {
-        activeResp[0].baseUrl = baseUrl;
-        activeResp[0].apiKeys = [apiKey];
-      }
-      // Update first active chatUpstream
-      const activeChat = (config.chatUpstream || []).filter(e => e.status === 'active').sort((a, b) => (a.priority || 99) - (b.priority || 99));
-      if (activeChat.length > 0) {
-        activeChat[0].baseUrl = baseUrl;
-        activeChat[0].apiKeys = [apiKey];
-      }
-      await backupFile(PATHS.codexDesktopConfig);
-      await atomicWrite(PATHS.codexDesktopConfig, JSON.stringify(config, null, 2) + '\n');
-    }
-  }
-
-  return backups;
+  throw new Error('syncAll 已废弃：请使用各产品 config/create + config/apply 创建新配置后应用，避免覆盖现有配置。');
 }
 
 async function writeClaudeDesktopPrep(data) {
@@ -2246,10 +2283,33 @@ function killProcessByName(name) {
   }
 }
 
+function killProcessCandidate(candidate) {
+  const name = processCandidateName(candidate);
+  const pathIncludes = candidate && typeof candidate === 'object' ? (candidate.pathIncludes || []) : [];
+  if (!name) return false;
+  if (IS_WIN && pathIncludes.length) {
+    try {
+      const targets = winProcessListByName(name).filter(row => processMatchesPathHints(row, pathIncludes));
+      let killed = false;
+      for (const row of targets) {
+        const pid = Number(row.ProcessId);
+        if (!Number.isInteger(pid) || pid <= 0) continue;
+        execSync(`taskkill /f /pid ${pid} 2>nul`, { encoding: 'utf-8', timeout: 5000 });
+        killed = true;
+      }
+      return killed;
+    } catch (e) {
+      return false;
+    }
+  }
+  return killProcessByName(name);
+}
+
 function killApp(processNames) {
   const killed = [];
-  for (const name of processNames) {
-    if (killProcessByName(name)) killed.push(name);
+  for (const candidate of processNames) {
+    const name = processCandidateName(candidate);
+    if (killProcessCandidate(candidate)) killed.push(name);
   }
   return killed;
 }
@@ -2291,42 +2351,184 @@ function sleepSync(ms) {
 function restartApp(product) {
   const app = APPS[product];
   if (!app) throw new Error('Unknown product: ' + product);
-  const killed = killApp(app.processes);
+  const runningBeforeRestart = getProcessStatus(product);
+  const discoveredExe = runningBeforeRestart.executablePath || '';
+  const killed = killApp(appRestartProcessCandidates(app));
   sleepSync(1000);
+  const launchPath = app.exe && fs.existsSync(app.exe) ? app.exe : discoveredExe;
   // If we have a valid exe/bundle path, relaunch; otherwise just kill (user reopens manually)
-  if (app.exe && fs.existsSync(app.exe)) {
-    const started = launchApp(app.exe);
-    return { product, name: app.name, killed, pid: started.pid, relaunched: true };
+  if (launchPath && fs.existsSync(launchPath)) {
+    const started = launchApp(launchPath);
+    return {
+      product,
+      name: app.name,
+      killed,
+      pid: started.pid,
+      relaunched: true,
+      exe: launchPath,
+      discoveredFromProcess: !!(discoveredExe && launchPath === discoveredExe),
+    };
   }
   return {
-    product, name: app.name, killed, relaunched: false,
+    product, name: app.name, killed, relaunched: false, discoveredExe,
     warning: '未配置 ' + app.name + ' 的程序路径，已关闭进程但无法自动重启。请在「应用路径」中填写路径，或手动重新打开 ' + app.name + '。',
   };
 }
 
-// ========== PROCESS STATUS (feature #6) ==========
-// Return { running, pid } for a managed product by checking its process names.
-function getProcessStatus(product) {
-  const app = APPS[product];
-  if (!app) return { running: false, pid: null, error: 'unknown product: ' + product };
-  for (const name of app.processes) {
-    const pid = findFirstPid(name);
-    if (pid) return { running: true, pid, name, product };
-  }
-  return { running: false, pid: null, product };
-}
-
-// Cross-platform: return the first PID matching `name`, or null.
-function findFirstPid(name) {
+function listeningPortsForPid(pid) {
+  const n = Number(pid);
+  if (!Number.isInteger(n) || n <= 0) return [];
   try {
     if (IS_WIN) {
-      const out = execSync(`tasklist /FI "IMAGENAME eq ${name}" /FO CSV /NH 2>nul`, { encoding: 'utf-8', timeout: 3000 });
-      const m = out.match(/"[^"]+","(\d+)"/);
-      return m ? parseInt(m[1]) : null;
+      const out = execSync('netstat -ano 2>nul', { encoding: 'utf-8', timeout: 3000, windowsHide: true });
+      const ports = new Set();
+      for (const line of out.split(/\r?\n/)) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length < 5 || parts[0].toUpperCase() !== 'TCP') continue;
+        if (parts[3].toUpperCase() !== 'LISTENING' || Number(parts[4]) !== n) continue;
+        const m = (parts[1] || '').match(/:(\d+)$/);
+        if (m) ports.add(Number(m[1]));
+      }
+      return Array.from(ports);
+    }
+    const out = execSync(`lsof -nP -a -p ${n} -iTCP -sTCP:LISTEN 2>/dev/null`, { encoding: 'utf-8', timeout: 3000 });
+    const ports = new Set();
+    for (const line of out.split(/\r?\n/).slice(1)) {
+      const m = line.match(/:(\d+)\s+\(LISTEN\)/);
+      if (m) ports.add(Number(m[1]));
+    }
+    return Array.from(ports);
+  } catch (e) {
+    return [];
+  }
+}
+
+// ========== PROCESS STATUS (feature #6) ==========
+// Return process diagnostics for a managed product by checking its process names.
+function getProcessStatus(product) {
+  const app = APPS[product];
+  if (!app) {
+    return {
+      product,
+      displayName: product,
+      running: false,
+      pid: null,
+      processName: null,
+      matchedName: null,
+      executablePath: '',
+      processNames: [],
+      ports: [],
+      checkedAt: new Date().toISOString(),
+      error: 'unknown product: ' + product,
+    };
+  }
+  const processNames = appProcessNames(app);
+  const processCandidates = appProcessCandidates(app);
+  const status = {
+    product,
+    displayName: app.name,
+    running: false,
+    pid: null,
+    processName: null,
+    matchedName: null,
+    executablePath: '',
+    processNames,
+    ports: product === 'proxy' ? uniqueNonEmpty([(readProxy()).proxyPort || '7897']).map(Number).filter(Boolean) : [],
+    checkedAt: new Date().toISOString(),
+  };
+  for (const candidate of processCandidates) {
+    const info = findFirstProcess(candidate);
+    if (info) {
+      status.running = true;
+      status.pid = info.pid;
+      status.processName = info.processName;
+      status.matchedName = info.matchedName;
+      status.executablePath = info.executablePath || '';
+      status.ports = uniqueNonEmpty(status.ports.concat(listeningPortsForPid(info.pid))).map(Number).filter(Boolean);
+      return status;
+    }
+  }
+  return status;
+}
+
+function processMatchesPathHints(proc, pathIncludes) {
+  if (!pathIncludes || !pathIncludes.length) return true;
+  const haystack = String((proc && proc.ExecutablePath) || '') + ' ' + String((proc && proc.CommandLine) || '');
+  const lower = haystack.toLowerCase();
+  return pathIncludes.every(part => lower.includes(String(part || '').toLowerCase()));
+}
+
+function winProcessListByName(name) {
+  const psName = path.basename(name, path.extname(name));
+  const script = `Get-Process -Name ${psQuote(psName)} -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,Path | ConvertTo-Json -Compress`;
+  const json = execFileSync('powershell.exe', ['-NoProfile', '-Command', script], {
+    encoding: 'utf-8',
+    timeout: 4000,
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+  const rows = json ? JSON.parse(json) : [];
+  const list = Array.isArray(rows) ? rows : (rows ? [rows] : []);
+  return list.map(row => ({
+    ProcessId: row.Id,
+    Name: row.ProcessName ? row.ProcessName + (String(row.ProcessName).toLowerCase().endsWith('.exe') ? '' : '.exe') : name,
+    ExecutablePath: row.Path || '',
+    CommandLine: '',
+  }));
+}
+
+// Cross-platform: return the first process matching `candidate`, or null.
+function findFirstProcess(candidate) {
+  const name = processCandidateName(candidate);
+  const pathIncludes = candidate && typeof candidate === 'object' ? (candidate.pathIncludes || []) : [];
+  if (!name) return null;
+  try {
+    if (IS_WIN) {
+      if (!pathIncludes.length) {
+        try {
+          const list = winProcessListByName(name);
+          const found = list.find(row => row.ExecutablePath) || list[0];
+          if (found) {
+            return {
+              pid: Number(found.ProcessId),
+              processName: found.Name || name,
+              matchedName: name,
+              executablePath: found.ExecutablePath || '',
+            };
+          }
+        } catch (e) {}
+        const out = execSync(`tasklist /FI "IMAGENAME eq ${name}" /FO CSV /NH 2>nul`, { encoding: 'utf-8', timeout: 3000 });
+        const m = out.match(/"([^"]+)","(\d+)"/);
+        return m ? { pid: parseInt(m[2], 10), processName: m[1], matchedName: name, executablePath: '' } : null;
+      }
+      try {
+        const list = winProcessListByName(name);
+        const found = list.find(row => processMatchesPathHints(row, pathIncludes));
+        if (found) return { pid: Number(found.ProcessId), processName: found.Name || name, matchedName: name, executablePath: found.ExecutablePath || '' };
+      } catch (e) {}
+      try {
+        const wmiName = name.replace(/'/g, "''");
+        const script = `Get-CimInstance Win32_Process -Filter "Name='${wmiName}'" | Select-Object ProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress`;
+        const json = execFileSync('powershell.exe', ['-NoProfile', '-Command', script], {
+          encoding: 'utf-8',
+          timeout: 4000,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        }).trim();
+        const rows = json ? JSON.parse(json) : [];
+        const list = Array.isArray(rows) ? rows : (rows ? [rows] : []);
+        const found = list.find(row => processMatchesPathHints(row, pathIncludes));
+        if (found) return { pid: Number(found.ProcessId), processName: found.Name || name, matchedName: name, executablePath: found.ExecutablePath || '' };
+        if (pathIncludes.length) return null;
+      } catch (e) {
+        if (pathIncludes.length) return null;
+      }
     }
     const out = execSync(`pgrep -f ${JSON.stringify(name)} 2>/dev/null`, { encoding: 'utf-8', timeout: 3000 });
     const first = out.trim().split('\n')[0];
-    return first ? parseInt(first) : null;
+    if (!first) return null;
+    const info = processInfo(first);
+    return { pid: parseInt(first, 10), processName: (info && (info.Name || info.name)) || name, matchedName: name, executablePath: (info && (info.ExecutablePath || info.executablePath)) || '' };
   } catch (e) { return null; }
 }
 
@@ -2979,6 +3181,132 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
+function sendJson(res, data, code) {
+  const r = json(data, code);
+  res.writeHead(r.code, { 'Content-Type': r.type });
+  res.end(r.body);
+}
+
+function sendError(res, msg, code) {
+  const r = error(msg, code);
+  res.writeHead(r.code, { 'Content-Type': r.type });
+  res.end(r.body);
+}
+
+function parseJsonBody(body) {
+  return JSON.parse(body || '{}');
+}
+
+async function handleJsonRoute(ctx, spec) {
+  const { method, url, body, res } = ctx;
+  if (method !== spec.method || url.pathname !== spec.path) return false;
+
+  try {
+    const data = spec.body ? parseJsonBody(body) : undefined;
+    const result = await spec.handler({ url, data, body });
+    sendJson(res, result);
+  } catch (e) {
+    const code = typeof spec.errorCode === 'function' ? spec.errorCode(e) : (spec.errorCode || 400);
+    sendError(res, e.message, code);
+  }
+
+  return true;
+}
+
+function sendConfigExport(res, filenamePrefix, payload, stripKey) {
+  const suffix = stripKey ? '-nokey' : '';
+  const fname = filenamePrefix + '-' + (payload.name || 'config').replace(/[^\w.-]+/g, '_') + suffix + '.json';
+  res.writeHead(200, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Disposition': 'attachment; filename="' + fname + '"',
+  });
+  res.end(JSON.stringify(payload, null, 2));
+}
+
+async function handleConfigRoute(ctx, spec) {
+  const { method, url, body, res } = ctx;
+  const pathname = url.pathname;
+
+  async function run(handler) {
+    try {
+      await handler();
+    } catch (e) {
+      sendError(res, e.message, 400);
+    }
+  }
+
+  if (method === 'GET' && pathname === spec.listPath) {
+    sendJson(res, spec.list());
+    return true;
+  }
+
+  if (method === 'POST' && pathname === spec.createPath) {
+    await run(async () => {
+      const data = parseJsonBody(body);
+      const id = await spec.create(data.name, data.config);
+      sendJson(res, { success: true, id, configs: spec.list() });
+    });
+    return true;
+  }
+
+  if (method === 'POST' && pathname === spec.applyPath) {
+    await run(async () => {
+      const data = parseJsonBody(body);
+      await spec.apply(data.id);
+      sendJson(res, { success: true, configs: spec.list() });
+    });
+    return true;
+  }
+
+  if (spec.updatePath && method === 'POST' && pathname === spec.updatePath) {
+    await run(async () => {
+      const data = parseJsonBody(body);
+      await spec.update(data.id, data.config);
+      sendJson(res, { success: true, configs: spec.list() });
+    });
+    return true;
+  }
+
+  if (method === 'POST' && pathname === spec.deletePath) {
+    await run(async () => {
+      const data = parseJsonBody(body);
+      const appliedId = await spec.remove(data.id);
+      sendJson(res, { success: true, appliedId, configs: spec.list() });
+    });
+    return true;
+  }
+
+  if (method === 'POST' && pathname === spec.renamePath) {
+    await run(async () => {
+      const data = parseJsonBody(body);
+      await spec.rename(data.id, data.name);
+      sendJson(res, { success: true, configs: spec.list() });
+    });
+    return true;
+  }
+
+  if (spec.importPath && method === 'POST' && pathname === spec.importPath) {
+    await run(async () => {
+      const data = parseJsonBody(body);
+      const id = await spec.create(data.name, data.config);
+      sendJson(res, { success: true, id, configs: spec.list() });
+    });
+    return true;
+  }
+
+  if (method === 'GET' && pathname === spec.exportPath) {
+    await run(async () => {
+      const id = url.searchParams.get('id');
+      if (!id) throw new Error('Missing id');
+      const stripKey = url.searchParams.get('stripKey') === '1';
+      sendConfigExport(res, spec.filenamePrefix, spec.exportConfig(id, stripKey), stripKey);
+    });
+    return true;
+  }
+
+  return false;
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   const method = req.method.toUpperCase();
@@ -3046,23 +3374,27 @@ const server = http.createServer(async (req, res) => {
 
     // GET /api/state
     if (method === 'GET' && url.pathname === '/api/state') {
+      const stateErrors = [];
       const state = {
-        claudeCode: readClaudeCode(),
-        claudeDesktop: readClaudeDesktop(),
-        codexCli: readCodexCli(),
-        codexDesktop: readCodexDesktop(),
-        proxy: readProxy(),
-        uiSettings: readUiSettings(),
+        claudeCode: readStatePart('claudeCode', readClaudeCode, { authToken: '', baseUrl: '', opusModel: '', sonnetModel: '', haikuModel: '', model: '', reasoningModel: '', subagentModel: '', apiTimeoutMs: '3000000', disableNonessential: '1', attributionHeader: '0', effortLevel: 'high', thinkingMode: 'adaptive', thinkingBudget: '10000' }, stateErrors),
+        claudeDesktop: readStatePart('claudeDesktop', readClaudeDesktop, { apiKey: '', baseUrl: '', authScheme: 'bearer', provider: 'gateway', models: '', egressHosts: '*', disableDeploymentChooser: true }, stateErrors),
+        codexCli: readStatePart('codexCli', readCodexCli, { baseUrl: '', apiKey: '', model: 'gpt-5.5', modelProvider: 'custom', providerName: 'My Codex', wireApi: 'responses', requiresOpenaiAuth: true, reasoningEffort: 'high', reasoningSummary: 'auto', verbosity: '', disableResponseStorage: false, httpHeaders: {}, requestMaxRetries: '', streamMaxRetries: '', streamIdleTimeoutMs: '', configId: '' }, stateErrors),
+        codexDesktop: readStatePart('codexDesktop', readCodexDesktop, { injectedBaseUrl: '', injectedApiKey: '', responsesUpstream: [], chatUpstream: [], circuitBreaker: {}, fuzzyModeEnabled: false }, stateErrors),
+        proxy: readStatePart('proxy', readProxy, { httpProxy: '', httpsProxy: '', allProxy: '', noProxy: 'localhost,127.0.0.1,::1', wsProxy: '', wssProxy: '', proxyHost: '127.0.0.1', proxyPort: '7897' }, stateErrors),
+        uiSettings: readStatePart('uiSettings', readUiSettings, { theme: 'classic', sidebarLayout: 'classic' }, stateErrors),
       };
-      const r = json(state);
-      res.writeHead(r.code, { 'Content-Type': r.type });
-      res.end(r.body);
+      if (stateErrors.length) state.readErrors = stateErrors;
+      sendJson(res, state);
       return;
     }
 
     // POST /api/save — full config save
     if (method === 'POST' && url.pathname === '/api/save') {
       const data = JSON.parse(body || '{}');
+      if (data.syncAll) {
+        sendError(res, 'syncAll 已废弃：请使用各产品 config/create + config/apply 创建新配置后应用，避免覆盖现有配置。', 410);
+        return;
+      }
       const backups = [];
 
       if (data.claudeCode) {
@@ -3092,36 +3424,28 @@ const server = http.createServer(async (req, res) => {
         backups.push('ui-settings.json');
       }
 
-      const r = json({ success: true, backups });
-      res.writeHead(r.code, { 'Content-Type': r.type });
-      res.end(r.body);
+      sendJson(res, { success: true, backups });
       return;
     }
 
     // GET /api/proxy/status
     if (method === 'GET' && url.pathname === '/api/proxy/status') {
       const status = checkProxyStatus();
-      const r = json(status);
-      res.writeHead(r.code, { 'Content-Type': r.type });
-      res.end(r.body);
+      sendJson(res, status);
       return;
     }
 
     // POST /api/proxy/start
     if (method === 'POST' && url.pathname === '/api/proxy/start') {
       const result = startProxy();
-      const r = json({ success: true, ...result });
-      res.writeHead(r.code, { 'Content-Type': r.type });
-      res.end(r.body);
+      sendJson(res, { success: true, ...result });
       return;
     }
 
     // POST /api/proxy/stop
     if (method === 'POST' && url.pathname === '/api/proxy/stop') {
       const result = stopProxy();
-      const r = json({ success: true, results: result });
-      res.writeHead(r.code, { 'Content-Type': r.type });
-      res.end(r.body);
+      sendJson(res, { success: true, results: result });
       return;
     }
 
@@ -3129,9 +3453,7 @@ const server = http.createServer(async (req, res) => {
     if (method === 'POST' && url.pathname === '/api/proxy/apply') {
       const data = JSON.parse(body || '{}');
       await writeProxy(data);
-      const r = json({ success: true });
-      res.writeHead(r.code, { 'Content-Type': r.type });
-      res.end(r.body);
+      sendJson(res, { success: true });
       return;
     }
 
@@ -3140,9 +3462,7 @@ const server = http.createServer(async (req, res) => {
     if (method === 'POST' && restartMatch) {
       const product = restartMatch[1];
       const result = restartApp(product);
-      const r = json({ success: true, ...result });
-      res.writeHead(r.code, { 'Content-Type': r.type });
-      res.end(r.body);
+      sendJson(res, { success: true, ...result });
       return;
     }
 
@@ -3154,8 +3474,7 @@ const server = http.createServer(async (req, res) => {
       const authScheme = url.searchParams.get('authScheme') || undefined;
       const maxTokens = parseInt(url.searchParams.get('maxTokens')) || 16;
       if (!baseUrl || (!apiKey && authScheme !== 'none')) {
-        const r = error('Missing baseUrl or apiKey query parameter', 400);
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+        sendError(res, 'Missing baseUrl or apiKey query parameter', 400); return;
       }
       // Feature #7: time the probe and additionally try GET /v1/models so the UI
       // can report "connected, detected N models" vs "connected but no model list".
@@ -3176,9 +3495,26 @@ const server = http.createServer(async (req, res) => {
         result.modelsDetected = 0;
         result.modelsError = e.message;
       }
-      const r = json(result);
-      res.writeHead(r.code, { 'Content-Type': r.type });
-      res.end(r.body);
+      sendJson(res, result);
+      return;
+    }
+
+    // GET /api/claude-code/models?baseUrl=...&apiKey=... — fetch models using Claude Code config or current form values
+    if (method === 'GET' && url.pathname === '/api/claude-code/models') {
+      const cc = readClaudeCode();
+      const baseUrl = (url.searchParams.get('baseUrl') || cc.baseUrl || '').trim();
+      const apiKey = (url.searchParams.get('apiKey') || cc.authToken || '').trim();
+      if (!baseUrl || !apiKey) {
+        sendError(res, 'Missing Claude Code Base URL or API Key', 400);
+        return;
+      }
+      let result;
+      try {
+        result = await fetchModelsFromAPI(baseUrl, apiKey);
+      } catch (e) {
+        result = { error: 'Base URL 格式无效: ' + e.message, models: [] };
+      }
+      sendJson(res, result);
       return;
     }
 
@@ -3187,15 +3523,11 @@ const server = http.createServer(async (req, res) => {
       const baseUrl = url.searchParams.get('baseUrl');
       const apiKey = url.searchParams.get('apiKey');
       if (!baseUrl || !apiKey) {
-        const r = error('Missing baseUrl or apiKey query parameter', 400);
-        res.writeHead(r.code, { 'Content-Type': r.type });
-        res.end(r.body);
+        sendError(res, 'Missing baseUrl or apiKey query parameter', 400);
         return;
       }
       const result = await fetchModelsFromAPI(baseUrl, apiKey);
-      const r = json(result);
-      res.writeHead(r.code, { 'Content-Type': r.type });
-      res.end(r.body);
+      sendJson(res, result);
       return;
     }
 
@@ -3207,115 +3539,91 @@ const server = http.createServer(async (req, res) => {
       const t0 = Date.now();
       const result = await testOpenAIChatAPI(baseUrl, apiKey, model, { maxTokens: 64 });
       result.duration_ms = Date.now() - t0;
-      const r = json(result);
-      res.writeHead(r.code, { 'Content-Type': r.type });
-      res.end(r.body);
+      sendJson(res, result);
       return;
     }
 
     // GET /api/agent-bridge/status — CodexPro + Copilot + handoff dashboard state
-    if (method === 'GET' && url.pathname === '/api/agent-bridge/status') {
-      const r = json(await getAgentBridgeStatus());
-      res.writeHead(r.code, { 'Content-Type': r.type });
-      res.end(r.body);
-      return;
-    }
+    if (await handleJsonRoute({ method, url, body, res }, {
+      method: 'GET',
+      path: '/api/agent-bridge/status',
+      errorCode: 500,
+      handler: () => getAgentBridgeStatus(),
+    })) return;
 
     // GET /api/agent-bridge/copilot-api/status — launcher defaults + managed process state
-    if (method === 'GET' && url.pathname === '/api/agent-bridge/copilot-api/status') {
-      const r = json(getCopilotApiLauncherStatus({}));
-      res.writeHead(r.code, { 'Content-Type': r.type });
-      res.end(r.body);
-      return;
-    }
+    if (await handleJsonRoute({ method, url, body, res }, {
+      method: 'GET',
+      path: '/api/agent-bridge/copilot-api/status',
+      errorCode: 500,
+      handler: () => getCopilotApiLauncherStatus({}),
+    })) return;
 
     // GET /api/agent-bridge/path-picker?dir=... — list local folders for the Copilot API project picker
-    if (method === 'GET' && url.pathname === '/api/agent-bridge/path-picker') {
-      try {
-        const r = json(listDirectoryForPicker(url.searchParams.get('dir') || ''));
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
-      } catch (e) {
-        const r = error(e.message, 400);
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
-      }
-      return;
-    }
+    if (await handleJsonRoute({ method, url, body, res }, {
+      method: 'GET',
+      path: '/api/agent-bridge/path-picker',
+      handler: ({ url }) => listDirectoryForPicker(url.searchParams.get('dir') || ''),
+    })) return;
 
     // POST /api/agent-bridge/copilot-api/command — render a PowerShell startup command with proxy env
-    if (method === 'POST' && url.pathname === '/api/agent-bridge/copilot-api/command') {
-      try {
-        const data = JSON.parse(body || '{}');
-        const r = json(getCopilotApiLauncherStatus(data));
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
-      } catch (e) {
-        const r = error(e.message, 400);
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
-      }
-      return;
-    }
+    if (await handleJsonRoute({ method, url, body, res }, {
+      method: 'POST',
+      path: '/api/agent-bridge/copilot-api/command',
+      body: true,
+      handler: ({ data }) => getCopilotApiLauncherStatus(data),
+    })) return;
 
     // POST /api/agent-bridge/copilot-api/start — start Windows-Copilot-API with proxy env vars
     if (method === 'POST' && url.pathname === '/api/agent-bridge/copilot-api/start') {
       try {
         const data = JSON.parse(body || '{}');
-        const r = json({ success: true, ...startCopilotApi(data) });
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
+        sendJson(res, { success: true, ...startCopilotApi(data) });
       } catch (e) {
         const code = e.code === 'PORT_BUSY' || e.code === 'ALREADY_RUNNING' ? 409 : 400;
-        const r = error(e.message, code);
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
+        sendError(res, e.message, code);
       }
       return;
     }
 
     // POST /api/agent-bridge/copilot-api/stop — stop only the app.py process launched by RelayManager
-    if (method === 'POST' && url.pathname === '/api/agent-bridge/copilot-api/stop') {
-      const r = json({ success: true, ...stopManagedCopilotApi() });
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
-      return;
-    }
+    if (await handleJsonRoute({ method, url, body, res }, {
+      method: 'POST',
+      path: '/api/agent-bridge/copilot-api/stop',
+      errorCode: 500,
+      handler: () => ({ success: true, ...stopManagedCopilotApi() }),
+    })) return;
 
     // POST /api/agent-bridge/copilot-api/stop-port-owner — stop the app.py process that owns the configured port
     if (method === 'POST' && url.pathname === '/api/agent-bridge/copilot-api/stop-port-owner') {
       try {
         const data = JSON.parse(body || '{}');
-        const r = json({ success: true, ...stopCopilotPortOwner(data) });
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
+        sendJson(res, { success: true, ...stopCopilotPortOwner(data) });
       } catch (e) {
         const code = e.code === 'CONFIRMATION_REQUIRED' ? 400 : 409;
-        const r = error(e.message, code);
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
+        sendError(res, e.message, code);
       }
       return;
     }
 
     // GET /api/agent-bridge/handoff/file?name=current-plan.md
-    if (method === 'GET' && url.pathname === '/api/agent-bridge/handoff/file') {
-      try {
-        const r = json(readBridgeFile(url.searchParams.get('name') || HANDOFF_FILES.plan));
-        res.writeHead(r.code, { 'Content-Type': r.type });
-        res.end(r.body);
-      } catch (e) {
-        const r = error(e.message, 400);
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
-      }
-      return;
-    }
+    if (await handleJsonRoute({ method, url, body, res }, {
+      method: 'GET',
+      path: '/api/agent-bridge/handoff/file',
+      handler: ({ url }) => readBridgeFile(url.searchParams.get('name') || HANDOFF_FILES.plan),
+    })) return;
 
     // POST /api/agent-bridge/handoff/file — save a whitelisted .ai-bridge file
-    if (method === 'POST' && url.pathname === '/api/agent-bridge/handoff/file') {
-      const data = JSON.parse(body || '{}');
-      try {
+    if (await handleJsonRoute({ method, url, body, res }, {
+      method: 'POST',
+      path: '/api/agent-bridge/handoff/file',
+      body: true,
+      errorCode: (e) => e.code === 'EEXIST' ? 409 : 400,
+      handler: async ({ data }) => {
         const saved = await writeBridgeFile(data.name || HANDOFF_FILES.plan, data.content || '', !!data.overwrite);
-        const r = json({ success: true, file: saved });
-        res.writeHead(r.code, { 'Content-Type': r.type });
-        res.end(r.body);
-      } catch (e) {
-        const r = error(e.message, e.code === 'EEXIST' ? 409 : 400);
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
-      }
-      return;
-    }
+        return { success: true, file: saved };
+      },
+    })) return;
 
     // POST /api/agent-bridge/copilot-codex-cli — create/apply the Windows Copilot Codex CLI profile
     if (method === 'POST' && url.pathname === '/api/agent-bridge/copilot-codex-cli') {
@@ -3327,11 +3635,9 @@ const server = http.createServer(async (req, res) => {
       });
       const unsupported = '当前 Codex CLI 已不再支持 wire_api = "chat"。Windows Copilot API 只提供 chat/completions，不能直接写入 Codex CLI config.toml；请只使用启动器和 chat/completions 测试，或先增加 /v1/responses 适配层。';
       if (data.action === 'apply') {
-        const r = error(unsupported, 400);
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+        sendError(res, unsupported, 400); return;
       }
-      const r = error(unsupported, 400);
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+      sendError(res, unsupported, 400); return;
     }
 
     // POST /api/agent-bridge/codexpro/run — run whitelisted CodexPro diagnostics or handoff commands
@@ -3339,28 +3645,22 @@ const server = http.createServer(async (req, res) => {
       const data = JSON.parse(body || '{}');
       try {
         const result = await runCodexProBridgeCommand(data);
-        const r = json({ success: result.success, ...result });
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
+        sendJson(res, { success: result.success, ...result });
       } catch (e) {
-        const r = error(e.message, e.code === 'CONFIRMATION_REQUIRED' ? 400 : 500);
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body);
+        sendError(res, e.message, e.code === 'CONFIRMATION_REQUIRED' ? 400 : 500);
       }
       return;
     }
 
     // GET /api/paths — read app exe paths (auto-detected + user config)
     if (method === 'GET' && url.pathname === '/api/paths') {
-      const r = json(getAppsInfo());
-      res.writeHead(r.code, { 'Content-Type': r.type });
-      res.end(r.body);
+      sendJson(res, getAppsInfo());
       return;
     }
 
     // GET /api/autostart — check if auto-start is enabled
     if (method === 'GET' && url.pathname === '/api/autostart') {
-      const r = json({ enabled: isAutostartEnabled(), vbsPath: AUTOSTART_PATH, platform: process.platform });
-      res.writeHead(r.code, { 'Content-Type': r.type });
-      res.end(r.body);
+      sendJson(res, { enabled: isAutostartEnabled(), vbsPath: AUTOSTART_PATH, platform: process.platform });
       return;
     }
 
@@ -3369,12 +3669,10 @@ const server = http.createServer(async (req, res) => {
       const data = JSON.parse(body || '{}');
       if (data.enabled) {
         enableAutostart();
-        const r = json({ success: true, enabled: true, vbsPath: AUTOSTART_PATH });
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+        sendJson(res, { success: true, enabled: true, vbsPath: AUTOSTART_PATH }); return;
       } else {
         disableAutostart();
-        const r = json({ success: true, enabled: false });
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+        sendJson(res, { success: true, enabled: false }); return;
       }
     }
 
@@ -3391,17 +3689,13 @@ const server = http.createServer(async (req, res) => {
       }
       await atomicWrite(PATHS_CONFIG_FILE, JSON.stringify(cfg, null, 2) + '\n');
       applyPathsConfig();
-      const r = json({ success: true, apps: getAppsInfo() });
-      res.writeHead(r.code, { 'Content-Type': r.type });
-      res.end(r.body);
+      sendJson(res, { success: true, apps: getAppsInfo() });
       return;
     }
 
     // GET /api/gateway — read gateway config
     if (method === 'GET' && url.pathname === '/api/gateway') {
-      const r = json(readGatewayConfig());
-      res.writeHead(r.code, { 'Content-Type': r.type });
-      res.end(r.body);
+      sendJson(res, readGatewayConfig());
       return;
     }
 
@@ -3436,9 +3730,7 @@ const server = http.createServer(async (req, res) => {
         cfg.routes = routes;
       }
       await writeGatewayConfig(cfg);
-      const r = json({ success: true, config: cfg, gatewayUrl: 'http://127.0.0.1:' + (cfg.port || GATEWAY_DEFAULT_PORT) });
-      res.writeHead(r.code, { 'Content-Type': r.type });
-      res.end(r.body);
+      sendJson(res, { success: true, config: cfg, gatewayUrl: 'http://127.0.0.1:' + (cfg.port || GATEWAY_DEFAULT_PORT) });
       return;
     }
 
@@ -3450,8 +3742,7 @@ const server = http.createServer(async (req, res) => {
       const models = Object.keys(cfg.routes || {}).map(name => ({ name }));
       const meta = readJSON(PATHS.claudeDesktopMeta);
       if (!meta || !meta.appliedId) {
-        const r = error('Claude Desktop 3P config not found (_meta.json missing)', 400);
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+        sendError(res, 'Claude Desktop 3P config not found (_meta.json missing)', 400); return;
       }
       const filePath = path.join(PATHS.claudeDesktopDir, meta.appliedId + '.json');
       let obj = readJSON(filePath) || {};
@@ -3462,278 +3753,82 @@ const server = http.createServer(async (req, res) => {
       if (models.length > 0) obj.inferenceModels = JSON.stringify(models);
       await backupFile(filePath);
       await atomicWrite(filePath, JSON.stringify(obj, null, 2) + '\n');
-      const r = json({ success: true, gatewayUrl, inferenceModels: models });
-      res.writeHead(r.code, { 'Content-Type': r.type });
-      res.end(r.body);
+      sendJson(res, { success: true, gatewayUrl, inferenceModels: models });
       return;
     }
 
-    // ===== Claude Desktop 3P multi-config management =====
-    // GET /api/claude-desktop/configs — list all configs + which is applied
-    if (method === 'GET' && url.pathname === '/api/claude-desktop/configs') {
-      const r = json(listCDConfigs());
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
-    // POST /api/claude-desktop/config/create — { name, config? } (config? = import payload)
-    if (method === 'POST' && url.pathname === '/api/claude-desktop/config/create') {
-      const data = JSON.parse(body || '{}');
-      const id = await createCDConfig(data.name, data.config);
-      const r = json({ success: true, id, configs: listCDConfigs() });
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
-    // POST /api/claude-desktop/config/apply — { id }
-    if (method === 'POST' && url.pathname === '/api/claude-desktop/config/apply') {
-      const data = JSON.parse(body || '{}');
-      await applyCDConfig(data.id);
-      const r = json({ success: true, configs: listCDConfigs() });
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
-    // POST /api/claude-desktop/config/delete — { id }
-    if (method === 'POST' && url.pathname === '/api/claude-desktop/config/delete') {
-      const data = JSON.parse(body || '{}');
-      const appliedId = await deleteCDConfig(data.id);
-      const r = json({ success: true, appliedId, configs: listCDConfigs() });
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
-    // POST /api/claude-desktop/config/rename — { id, name }
-    if (method === 'POST' && url.pathname === '/api/claude-desktop/config/rename') {
-      const data = JSON.parse(body || '{}');
-      await renameCDConfig(data.id, data.name);
-      const r = json({ success: true, configs: listCDConfigs() });
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
-    // GET /api/claude-desktop/config/export?id=...&stripKey=1 — download portable JSON
-    if (method === 'GET' && url.pathname === '/api/claude-desktop/config/export') {
-      const id = url.searchParams.get('id');
-      if (!id) { const r = error('Missing id', 400); res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return; }
-      const stripKey = url.searchParams.get('stripKey') === '1';
-      const payload = exportCDConfig(id, stripKey);
-      const suffix = stripKey ? '-nokey' : '';
-      const fname = 'claude-desktop-' + (payload.name || 'config').replace(/[^\w.-]+/g, '_') + suffix + '.json';
-      res.writeHead(200, {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Content-Disposition': 'attachment; filename="' + fname + '"',
-      });
-      res.end(JSON.stringify(payload, null, 2));
-      return;
-    }
+    if (await handleConfigRoute({ method, url, body, res }, {
+      listPath: '/api/claude-desktop/configs',
+      createPath: '/api/claude-desktop/config/create',
+      applyPath: '/api/claude-desktop/config/apply',
+      deletePath: '/api/claude-desktop/config/delete',
+      renamePath: '/api/claude-desktop/config/rename',
+      exportPath: '/api/claude-desktop/config/export',
+      filenamePrefix: 'claude-desktop',
+      list: listCDConfigs,
+      create: createCDConfig,
+      apply: applyCDConfig,
+      remove: deleteCDConfig,
+      rename: renameCDConfig,
+      exportConfig: exportCDConfig,
+    })) return;
 
-    // ===== Claude Code CLI — 多套配置（预设）管理 =====
-    // GET /api/claude-code/configs — 列出全部预设 + 当前生效 id
-    if (method === 'GET' && url.pathname === '/api/claude-code/configs') {
-      const r = json(listCCConfigs());
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
-    // POST /api/claude-code/config/create — { name, config? }（config? = 导入/复制内容）
-    if (method === 'POST' && url.pathname === '/api/claude-code/config/create') {
-      const data = JSON.parse(body || '{}');
-      const id = await createCCConfig(data.name, data.config);
-      const r = json({ success: true, id, configs: listCCConfigs() });
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
-    // POST /api/claude-code/config/apply — { id } 写入 settings.json 并标记生效
-    if (method === 'POST' && url.pathname === '/api/claude-code/config/apply') {
-      const data = JSON.parse(body || '{}');
-      try {
-        await applyCCConfig(data.id);
-        const r = json({ success: true, configs: listCCConfigs() });
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-      } catch (e) {
-        const r = error(e.message, 400);
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-      }
-    }
-    // POST /api/claude-code/config/update — { id, config } 更新预设内容（保存时同步）
-    if (method === 'POST' && url.pathname === '/api/claude-code/config/update') {
-      const data = JSON.parse(body || '{}');
-      try {
-        await updateCCConfig(data.id, data.config);
-        const r = json({ success: true, configs: listCCConfigs() });
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-      } catch (e) {
-        const r = error(e.message, 400);
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-      }
-    }
-    // POST /api/claude-code/config/import — { name, config } 导入后创建并返回新 id
-    if (method === 'POST' && url.pathname === '/api/claude-code/config/import') {
-      const data = JSON.parse(body || '{}');
-      try {
-        const id = await createCCConfig(data.name, data.config);
-        const r = json({ success: true, id, configs: listCCConfigs() });
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-      } catch (e) {
-        const r = error(e.message, 400);
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-      }
-    }
-    // POST /api/claude-code/config/delete — { id }
-    if (method === 'POST' && url.pathname === '/api/claude-code/config/delete') {
-      const data = JSON.parse(body || '{}');
-      const appliedId = await deleteCCConfig(data.id);
-      const r = json({ success: true, appliedId, configs: listCCConfigs() });
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
-    // POST /api/claude-code/config/rename — { id, name }
-    if (method === 'POST' && url.pathname === '/api/claude-code/config/rename') {
-      const data = JSON.parse(body || '{}');
-      await renameCCConfig(data.id, data.name);
-      const r = json({ success: true, configs: listCCConfigs() });
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
-    // GET /api/claude-code/config/export?id=...&stripKey=1 — 下载可移植 JSON
-    if (method === 'GET' && url.pathname === '/api/claude-code/config/export') {
-      const id = url.searchParams.get('id');
-      if (!id) { const r = error('Missing id', 400); res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return; }
-      const stripKey = url.searchParams.get('stripKey') === '1';
-      const payload = exportCCConfig(id, stripKey);
-      const suffix = stripKey ? '-nokey' : '';
-      const fname = 'claude-code-' + (payload.name || 'config').replace(/[^\w.-]+/g, '_') + suffix + '.json';
-      res.writeHead(200, {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Content-Disposition': 'attachment; filename="' + fname + '"',
-      });
-      res.end(JSON.stringify(payload, null, 2));
-      return;
-    }
+    if (await handleConfigRoute({ method, url, body, res }, {
+      listPath: '/api/claude-code/configs',
+      createPath: '/api/claude-code/config/create',
+      applyPath: '/api/claude-code/config/apply',
+      updatePath: '/api/claude-code/config/update',
+      importPath: '/api/claude-code/config/import',
+      deletePath: '/api/claude-code/config/delete',
+      renamePath: '/api/claude-code/config/rename',
+      exportPath: '/api/claude-code/config/export',
+      filenamePrefix: 'claude-code',
+      list: listCCConfigs,
+      create: createCCConfig,
+      apply: applyCCConfig,
+      update: updateCCConfig,
+      remove: deleteCCConfig,
+      rename: renameCCConfig,
+      exportConfig: exportCCConfig,
+    })) return;
 
-    // ===== CODEX CLI 预设配置路由 =====
-    // GET /api/codex-cli/config/list — 列出全部预设及当前应用项
-    if (method === 'GET' && url.pathname === '/api/codex-cli/config/list') {
-      const r = json(listCodexConfigs());
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
-    // POST /api/codex-cli/config/create — 新建预设 { name, config }
-    if (method === 'POST' && url.pathname === '/api/codex-cli/config/create') {
-      const data = JSON.parse(body || '{}');
-      const id = await createCodexConfig(data.name, data.config);
-      const r = json({ success: true, id, configs: listCodexConfigs() });
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
-    // POST /api/codex-cli/config/apply — 应用预设 { id }（写入 config.toml）
-    if (method === 'POST' && url.pathname === '/api/codex-cli/config/apply') {
-      const data = JSON.parse(body || '{}');
-      await applyCodexConfig(data.id);
-      const r = json({ success: true, configs: listCodexConfigs() });
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
-    // POST /api/codex-cli/config/update — 更新预设 { id, config }
-    if (method === 'POST' && url.pathname === '/api/codex-cli/config/update') {
-      const data = JSON.parse(body || '{}');
-      await updateCodexConfig(data.id, data.config);
-      const r = json({ success: true, configs: listCodexConfigs() });
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
-// POST /api/codex-cli/config/delete — 删除预设 { id }
-    if (method === 'POST' && url.pathname === '/api/codex-cli/config/delete') {
-      const data = JSON.parse(body || '{}');
-      const appliedId = await deleteCodexConfig(data.id);
-      const r = json({ success: true, appliedId, configs: listCodexConfigs() });
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
-    // POST /api/codex-cli/config/rename — 重命名预设 { id, name }
-    if (method === 'POST' && url.pathname === '/api/codex-cli/config/rename') {
-      const data = JSON.parse(body || '{}');
-      await renameCodexConfig(data.id, data.name);
-      const r = json({ success: true, configs: listCodexConfigs() });
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
-    // GET /api/codex-cli/config/export?id=...&stripKey=1 — 下载可移植 JSON
-    if (method === 'GET' && url.pathname === '/api/codex-cli/config/export') {
-      const id = url.searchParams.get('id');
-      if (!id) { const r = error('Missing id', 400); res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return; }
-      const stripKey = url.searchParams.get('stripKey') === '1';
-      const payload = exportCodexConfig(id, stripKey);
-      const suffix = stripKey ? '-nokey' : '';
-      const fname = 'codex-cli-' + (payload.name || 'config').replace(/[^\w.-]+/g, '_') + suffix + '.json';
-      res.writeHead(200, {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Content-Disposition': 'attachment; filename="' + fname + '"',
-      });
-      res.end(JSON.stringify(payload, null, 2));
-      return;
-    }
-    // POST /api/codex-cli/config/import — 导入 JSON 预设 { name, config }
-    if (method === 'POST' && url.pathname === '/api/codex-cli/config/import') {
-      const data = JSON.parse(body || '{}');
-      try {
-        // 导入只创建预设，不覆写 config.toml（保守策略，与 Claude Code 版差异）
-        const id = await createCodexConfig(data.name, data.config);
-        const r = json({ success: true, id, configs: listCodexConfigs() });
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-      } catch (e) {
-        const r = error(e.message, 400);
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-      }
-    }
-    // ===== CODEX DESKTOP 预设配置路由 =====
-    // GET /api/codex-desktop/config/list — 列出全部预设及当前应用项
-    if (method === 'GET' && url.pathname === '/api/codex-desktop/config/list') {
-      const r = json(listCXDConfigs());
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
-    // POST /api/codex-desktop/config/create — 新建预设 { name, config }
-    if (method === 'POST' && url.pathname === '/api/codex-desktop/config/create') {
-      const data = JSON.parse(body || '{}');
-      const id = await createCXDConfig(data.name, data.config);
-      const r = json({ success: true, id, configs: listCXDConfigs() });
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
-    // POST /api/codex-desktop/config/apply — 应用预设 { id }（写入 config.json + codex.json）
-    if (method === 'POST' && url.pathname === '/api/codex-desktop/config/apply') {
-      const data = JSON.parse(body || '{}');
-      await applyCXDConfig(data.id);
-      const r = json({ success: true, configs: listCXDConfigs() });
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
-    // POST /api/codex-desktop/config/update — 更新预设 { id, config }
-    if (method === 'POST' && url.pathname === '/api/codex-desktop/config/update') {
-      const data = JSON.parse(body || '{}');
-      await updateCXDConfig(data.id, data.config);
-      const r = json({ success: true, configs: listCXDConfigs() });
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
-    // POST /api/codex-desktop/config/delete — 删除预设 { id }
-    if (method === 'POST' && url.pathname === '/api/codex-desktop/config/delete') {
-      const data = JSON.parse(body || '{}');
-      const appliedId = await deleteCXDConfig(data.id);
-      const r = json({ success: true, appliedId, configs: listCXDConfigs() });
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
-    // POST /api/codex-desktop/config/rename — 重命名预设 { id, name }
-    if (method === 'POST' && url.pathname === '/api/codex-desktop/config/rename') {
-      const data = JSON.parse(body || '{}');
-      await renameCXDConfig(data.id, data.name);
-      const r = json({ success: true, configs: listCXDConfigs() });
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
-    // GET /api/codex-desktop/config/export?id=...&stripKey=1 — 下载可移植 JSON
-    if (method === 'GET' && url.pathname === '/api/codex-desktop/config/export') {
-      const id = url.searchParams.get('id');
-      if (!id) { const r = error('Missing id', 400); res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return; }
-      const stripKey = url.searchParams.get('stripKey') === '1';
-      const payload = exportCXDConfig(id, stripKey);
-      const suffix = stripKey ? '-nokey' : '';
-      const fname = 'codex-desktop-' + (payload.name || 'config').replace(/[^\w.-]+/g, '_') + suffix + '.json';
-      res.writeHead(200, {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Content-Disposition': 'attachment; filename="' + fname + '"',
-      });
-      res.end(JSON.stringify(payload, null, 2));
-      return;
-    }
-    // POST /api/codex-desktop/config/import — 导入 JSON 预设 { name, config }
-    if (method === 'POST' && url.pathname === '/api/codex-desktop/config/import') {
-      const data = JSON.parse(body || '{}');
-      try {
-        const id = await createCXDConfig(data.name, data.config);
-        const r = json({ success: true, id, configs: listCXDConfigs() });
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-      } catch (e) {
-        const r = error(e.message, 400);
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-      }
-    }
+    if (await handleConfigRoute({ method, url, body, res }, {
+      listPath: '/api/codex-cli/config/list',
+      createPath: '/api/codex-cli/config/create',
+      applyPath: '/api/codex-cli/config/apply',
+      updatePath: '/api/codex-cli/config/update',
+      importPath: '/api/codex-cli/config/import',
+      deletePath: '/api/codex-cli/config/delete',
+      renamePath: '/api/codex-cli/config/rename',
+      exportPath: '/api/codex-cli/config/export',
+      filenamePrefix: 'codex-cli',
+      list: listCodexConfigs,
+      create: createCodexConfig,
+      apply: applyCodexConfig,
+      update: updateCodexConfig,
+      remove: deleteCodexConfig,
+      rename: renameCodexConfig,
+      exportConfig: exportCodexConfig,
+    })) return;
+
+    if (await handleConfigRoute({ method, url, body, res }, {
+      listPath: '/api/codex-desktop/config/list',
+      createPath: '/api/codex-desktop/config/create',
+      applyPath: '/api/codex-desktop/config/apply',
+      updatePath: '/api/codex-desktop/config/update',
+      importPath: '/api/codex-desktop/config/import',
+      deletePath: '/api/codex-desktop/config/delete',
+      renamePath: '/api/codex-desktop/config/rename',
+      exportPath: '/api/codex-desktop/config/export',
+      filenamePrefix: 'codex-desktop',
+      list: listCXDConfigs,
+      create: createCXDConfig,
+      apply: applyCXDConfig,
+      update: updateCXDConfig,
+      remove: deleteCXDConfig,
+      rename: renameCXDConfig,
+      exportConfig: exportCXDConfig,
+    })) return;
 
     // ===== Feature #2: GET /api/gateway/models — sync model list from upstream =====
     // Uses the gateway's configured upstream Base URL + key (or query overrides) to
@@ -3742,77 +3837,71 @@ const server = http.createServer(async (req, res) => {
       const gw = readGatewayConfig();
       const baseUrl = url.searchParams.get('baseUrl') || gw.upstreamBaseUrl;
       const apiKey = url.searchParams.get('apiKey') || gw.upstreamApiKey;
-      if (!baseUrl) { const r = error('网关上游 Base URL 未配置', 400); res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return; }
+      if (!baseUrl) { sendError(res, '网关上游 Base URL 未配置', 400); return; }
       const result = await fetchModelsFromAPI(baseUrl, apiKey);
-      const r = json(result);
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+      sendJson(res, result); return;
     }
 
     // ===== Feature #4: debug logs =====
     // GET /api/logs — return the in-memory ring buffer (already redacted)
-    if (method === 'GET' && url.pathname === '/api/logs') {
-      const r = json({ logs: debugLog.getLogs(), max: debugLog.MAX_LOGS });
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
+    if (await handleJsonRoute({ method, url, body, res }, {
+      method: 'GET',
+      path: '/api/logs',
+      errorCode: 500,
+      handler: () => ({ logs: debugLog.getLogs(), max: debugLog.MAX_LOGS }),
+    })) return;
     // DELETE /api/logs — clear the buffer
-    if (method === 'DELETE' && url.pathname === '/api/logs') {
-      debugLog.clearLogs();
-      const r = json({ success: true });
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
+    if (await handleJsonRoute({ method, url, body, res }, {
+      method: 'DELETE',
+      path: '/api/logs',
+      errorCode: 500,
+      handler: () => {
+        debugLog.clearLogs();
+        return { success: true };
+      },
+    })) return;
 
     // ===== Feature #5: config history & rollback =====
     // GET /api/config/history?product=claude-code|claude-desktop|codex-cli|codex-desktop
-    if (method === 'GET' && url.pathname === '/api/config/history') {
-      const product = url.searchParams.get('product') || '';
-      const result = listConfigHistory(product);
-      const r = json(result);
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
+    if (await handleJsonRoute({ method, url, body, res }, {
+      method: 'GET',
+      path: '/api/config/history',
+      errorCode: 500,
+      handler: ({ url }) => listConfigHistory(url.searchParams.get('product') || ''),
+    })) return;
     // POST /api/config/rollback — { product, filename }
     if (method === 'POST' && url.pathname === '/api/config/rollback') {
       const data = JSON.parse(body || '{}');
       try {
         const result = await rollbackConfig(data.product, data.filename);
-        const r = json({ success: true, ...result });
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+        sendJson(res, { success: true, ...result }); return;
       } catch (e) {
-        const r = error(e.message, 400);
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
+        sendError(res, e.message, 400); return;
       }
     }
 
     // ===== Feature #6: process status & restart =====
     // GET /api/process/status?product=claude-desktop|codex-desktop|proxy
-    if (method === 'GET' && url.pathname === '/api/process/status') {
-      const product = url.searchParams.get('product') || 'claude-desktop';
-      const r = json(getProcessStatus(product));
-      res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-    }
+    if (await handleJsonRoute({ method, url, body, res }, {
+      method: 'GET',
+      path: '/api/process/status',
+      errorCode: 500,
+      handler: ({ url }) => getProcessStatus(url.searchParams.get('product') || 'claude-desktop'),
+    })) return;
     // POST /api/process/restart — { product } (kill -> wait 2s -> start)
-    if (method === 'POST' && url.pathname === '/api/process/restart') {
-      const data = JSON.parse(body || '{}');
-      const product = data.product || 'claude-desktop';
-      try {
-        const result = restartApp(product);
-        const r = json({ success: true, ...result });
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-      } catch (e) {
-        const r = error(e.message, 400);
-        res.writeHead(r.code, { 'Content-Type': r.type }); res.end(r.body); return;
-      }
-    }
+    if (await handleJsonRoute({ method, url, body, res }, {
+      method: 'POST',
+      path: '/api/process/restart',
+      body: true,
+      handler: ({ data }) => ({ success: true, ...restartApp(data.product || 'claude-desktop') }),
+    })) return;
 
     // 404
-    const r = error('Not found', 404);
-    res.writeHead(r.code, { 'Content-Type': r.type });
-    res.end(r.body);
+    sendError(res, 'Not found', 404);
 
   } catch (e) {
     console.error('Error:', e.message);
-    const r = error(e.message, 500);
-    res.writeHead(r.code, { 'Content-Type': r.type });
-    res.end(r.body);
+    sendError(res, e.message, 500);
   }
 });
 

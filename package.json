@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "check": "node --check server.js",
-    "test": "node test/toml.test.js && node test/gateway.test.js && node test/features.test.js"
+    "test": "node test/toml.test.js && node test/gateway.test.js && node test/features.test.js && node test/frontend-flow.test.js"
   },
   "keywords": [
     "claude",

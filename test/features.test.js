@@ -1,6 +1,7 @@
 // New-features integration test (features #2/#4/#5/#6/#7 backend APIs).
 // Starts server.js with a temporary gateway.json + fake upstream, then verifies:
 //  - GET /api/gateway/models     (model sync)
+//  - GET /api/claude-code/models (Claude Code model sync)
 //  - GET/DELETE /api/logs        (debug log ring + redaction)
 //  - GET /api/config/history     (backup listing)
 //  - GET /api/process/status     (process detection shape)
@@ -118,6 +119,7 @@ function runTests(upPort, done) {
     get('/api/process/status?product=claude-desktop', (c2, b2) => {
       let j2 = {}; try { j2 = JSON.parse(b2); } catch (e) {}
       check('process/status returns {running, pid?}', typeof j2.running === 'boolean');
+      check('process/status returns tooltip diagnostics', Array.isArray(j2.processNames) && 'processName' in j2 && Array.isArray(j2.ports) && typeof j2.checkedAt === 'string');
 
       // 3. config history shape
       get('/api/config/history?product=claude-code', (c3, b3) => {
@@ -142,9 +144,17 @@ function runTests(upPort, done) {
                   let j6 = {}; try { j6 = JSON.parse(b6); } catch (e) {}
                   check('logs cleared', j6.logs && j6.logs.length === 0);
 
-                  // 6. enhanced test-message: duration_ms + modelsDetected
-                  const qs = 'baseUrl=' + encodeURIComponent('http://127.0.0.1:' + upPort) + '&apiKey=sk-x&model=glm-5.2';
-                  get('/api/test-message?' + qs, (c7, b7) => {
+                  // 6. Claude Code model sync from current form values
+                  const ccModelQs = 'baseUrl=' + encodeURIComponent('http://127.0.0.1:' + upPort) + '&apiKey=sk-claude-code-test';
+                  get('/api/claude-code/models?' + ccModelQs, (c7a, b7a) => {
+                    let j7a = {}; try { j7a = JSON.parse(b7a); } catch (e) {}
+                    check('claude-code/models returns 2 models', j7a.success && j7a.models && j7a.models.length === 2);
+                    check('claude-code/models includes expected model id', (j7a.models || []).some(m => m.id === 'glm-5.2'));
+                    check('claude-code/models does not leak api key', !b7a.includes('sk-claude-code-test'));
+
+                    // 7. enhanced test-message: duration_ms + modelsDetected
+                    const qs = 'baseUrl=' + encodeURIComponent('http://127.0.0.1:' + upPort) + '&apiKey=sk-x&model=glm-5.2';
+                    get('/api/test-message?' + qs, (c7, b7) => {
                     let j7 = {}; try { j7 = JSON.parse(b7); } catch (e) {}
                     check('test-message has duration_ms', typeof j7.duration_ms === 'number');
                     check('test-message detected 2 models', j7.modelsDetected === 2);
@@ -199,6 +209,14 @@ function runTests(upPort, done) {
                             check('codex-cli config list returns effective summary', j9e.effective && typeof j9e.effective.modelProvider === 'string' && typeof j9e.appliedMatchesEffective === 'boolean');
                             check('codex-cli config list includes provider metadata', Array.isArray(j9e.configs) && j9e.configs.every(c => 'modelProvider' in c && 'wireApi' in c));
 
+                          post('/api/codex-cli/config/apply', { id: '__missing_config__' }, (c9f, b9f) => {
+                            let j9f = {}; try { j9f = JSON.parse(b9f); } catch (e) {}
+                            check('config route helper returns 400 for missing apply target', c9f === 400 && /配置不存在|not found/i.test(j9f.error || ''));
+
+                          get('/api/codex-cli/config/export', (c9g, b9g) => {
+                            let j9g = {}; try { j9g = JSON.parse(b9g); } catch (e) {}
+                            check('config route helper requires export id', c9g === 400 && /Missing id/.test(j9g.error || ''));
+
                         post('/api/save', { uiSettings: { theme: 'modern', sidebarLayout: 'sidebar' } }, (c10, b10) => {
                           let j10 = {}; try { j10 = JSON.parse(b10); } catch (e) {}
                           check('ui settings save reports backup', Array.isArray(j10.backups) && j10.backups.includes('ui-settings.json'));
@@ -207,10 +225,16 @@ function runTests(upPort, done) {
                             let j11 = {}; try { j11 = JSON.parse(b11); } catch (e) {}
                             check('ui settings round-trip theme', j11.uiSettings && j11.uiSettings.theme === 'modern');
                             check('ui settings round-trip layout', j11.uiSettings && j11.uiSettings.sidebarLayout === 'sidebar');
-                            console.log(`\n=== ${pass} passed, ${fail} failed ===`);
-                            done(fail > 0 ? 1 : 0);
+                            post('/api/save', { syncAll: { baseUrl: 'http://127.0.0.1', apiKey: 'sk-test' } }, (c12, b12) => {
+                              let j12 = {}; try { j12 = JSON.parse(b12); } catch (e) {}
+                              check('legacy syncAll save is rejected', c12 === 410 && /syncAll/.test(j12.error || ''));
+                              console.log(`\n=== ${pass} passed, ${fail} failed ===`);
+                              done(fail > 0 ? 1 : 0);
+                            });
                             });
                           });
+                        });
+                        });
                         });
                       });
                       });
@@ -218,6 +242,7 @@ function runTests(upPort, done) {
                       });
                       });
                     });
+                  });
                   });
                 });
               });
