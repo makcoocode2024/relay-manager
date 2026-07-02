@@ -3628,11 +3628,6 @@ const server = http.createServer(async (req, res) => {
     // POST /api/agent-bridge/copilot-codex-cli — create/apply the Windows Copilot Codex CLI profile
     if (method === 'POST' && url.pathname === '/api/agent-bridge/copilot-codex-cli') {
       const data = JSON.parse(body || '{}');
-      const config = copilotCodexConfig({
-        baseUrl: data.baseUrl || COPILOT_DEFAULT_BASE_URL,
-        apiKey: data.apiKey || COPILOT_DEFAULT_API_KEY,
-        model: data.model || COPILOT_DEFAULT_MODEL,
-      });
       const unsupported = '当前 Codex CLI 已不再支持 wire_api = "chat"。Windows Copilot API 只提供 chat/completions，不能直接写入 Codex CLI config.toml；请只使用启动器和 chat/completions 测试，或先增加 /v1/responses 适配层。';
       if (data.action === 'apply') {
         sendError(res, unsupported, 400); return;

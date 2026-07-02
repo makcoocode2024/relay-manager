@@ -1,5 +1,64 @@
 # RelayManager
 
+## 发布版本说明（双版本）
+
+当前提供两个 Windows 发布包：
+
+* `RelayManager-Portable.zip`：便携版，内置 `runtime/node/`，目标电脑不需要安装 Node.js，也不需要执行 `npm install`。解压后双击 `启动.bat`。
+* `RelayManager-SystemNode.zip`：系统 Node 版，不内置 `runtime/node/`，目标电脑必须已经安装 Node.js，并且 `node`、`npm` 在 PATH 中可用。解压后双击 `启动-系统Node.bat`。
+
+生成两个版本：
+
+```bat
+打包便携版.bat
+打包系统Node版.bat
+```
+
+也可以使用命令：
+
+```bash
+npm run portable:build
+npm run system:build
+```
+
+两个发布包都会排除 `backups/`、日志、`.env`、`.env.local`、`gateway.json`、`paths.json`、各类本地预设配置、临时文件和 `.git/`，避免把本机密钥或本地状态打进发布包。
+
+## 新电脑开箱即用（便携版）
+
+便携版目标：新电脑不安装 Node.js、不执行 `npm install`，复制整个项目目录后直接双击 `启动.bat`。
+
+必须随项目一起携带：
+
+* `runtime/node/node.exe`：便携 Node.js 运行时。
+* `node_modules/@iarna/toml/`：项目唯一 npm 依赖。
+* `server.js`、`index.html`、`启动.bat`、`停止.bat`。
+
+发布前在旧电脑执行静态检查：
+
+```bash
+npm run portable:check
+```
+
+生成便携发布包：
+
+```bat
+打包便携版.bat
+```
+
+脚本会先执行 `portable:check`，再输出 `RelayManager-Portable.zip`。压缩包只包含运行必需文件和便携运行时，并排除 `backups/`、`*.log`、`gateway.json`、`paths.json`、各类本地配置预设、`.env`、`.env.local`、临时文件和 `.git/`。
+
+新电脑使用流程：
+
+1. 将 `RelayManager-Portable.zip` 复制到新电脑并解压。
+2. 双击 `启动.bat`。
+3. 浏览器访问 `http://localhost:9876`。
+4. 按页面流程填写 Base URL 和 API Key，占位示例：`https://api.example.com/v1`、`<API_KEY>`。
+5. 解析中转参数，建立模型映射，写入客户端实际读取的配置。
+6. 重启或重载客户端。
+7. 校验配置生效。
+
+如果启动脚本提示 `Portable Node runtime not found`，说明 `runtime/node/node.exe` 未随项目复制。
+
 中转站统一配置工具 —— 给 Claude Code CLI、Claude Desktop (3P)、Codex CLI、Codex Desktop 统一设置第三方中转站的 Base URL、API Key、模型映射，并控制 Clash Verge 代理启停。内置中转网关，完全脱离 CC Switch。
 
 ## 功能

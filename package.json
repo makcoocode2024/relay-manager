@@ -6,7 +6,10 @@
   "scripts": {
     "start": "node server.js",
     "check": "node --check server.js",
-    "test": "node test/toml.test.js && node test/gateway.test.js && node test/features.test.js && node test/frontend-flow.test.js"
+    "portable:check": "node scripts/check-portable.js",
+    "portable:build": "node scripts/build-portable.js portable",
+    "system:build": "node scripts/build-portable.js system",
+    "test": "node test/toml.test.js && node test/gateway.test.js && node test/features.test.js && node test/frontend-flow.test.js && node test/portable-startup.test.js && node test/portable-package.test.js && node test/copilot-codex-unsupported.test.js && node test/copilot-route-static.test.js"
   },
   "keywords": [
     "claude",
