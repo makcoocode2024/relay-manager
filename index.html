@@ -281,56 +281,22 @@ main { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
       <label><input type="checkbox" checked id="sync-cx"> Codex CLI</label>
       <label><input type="checkbox" checked id="sync-cxd"> Codex Desktop</label>
     </div>
+    <label class="check-row" style="justify-content:center;margin:-4px 0 12px;">
+      <input type="checkbox" id="sync-apply-restart">
+      <span>同步后自动重启相关桌面客户端</span>
+    </label>
+    <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-bottom:12px;">
+      <button class="btn btn-outline btn-sm" onclick="testSyncRelayConnection()">&#x1f50c; 测试连接</button>
+      <button class="btn btn-outline btn-sm" onclick="testSyncRealMessage()">&#x1f9ea; 真实对话自测</button>
+    </div>
     <button class="btn btn-primary btn-lg" onclick="applySyncToSelectedProducts()">&#x26a1; 应用到所选产品</button>
+    <div id="sync-test-status" style="font-size:12px;color:var(--text2);margin-top:12px;"></div>
+    <div class="model-list" id="sync-models-list" style="margin-top:12px;text-align:left;"></div>
   </div>
 
   <div class="card">
     <h2>&#x1f4ca; 当前配置状态</h2>
     <div class="status-grid" id="status-grid">加载中...</div>
-  </div>
-
-  <!-- Relay Connectivity Test Card -->
-  <div class="card">
-    <h2>&#x1f50d; 中转站连通性检测</h2>
-    <p style="font-size:12px;color:var(--text2);margin-bottom:12px;">输入任意中转站的 Base URL 和 API Key，测试连接是否可用，或获取可用模型列表。</p>
-    <div class="form-row">
-      <div class="form-group">
-        <label>Base URL</label>
-        <input type="text" id="test-base-url" placeholder="https://api.example.com">
-      </div>
-      <div class="form-group">
-        <label>API Key</label>
-        <div class="pwd-wrap">
-          <input type="password" id="test-api-key" placeholder="sk-...">
-          <button class="pwd-toggle" onclick="togglePwd('test-api-key',this)">&#x1f441;</button>
-        </div>
-      </div>
-    </div>
-    <div class="form-row" style="margin-top:4px;align-items:flex-end;">
-      <div class="form-group">
-        <label>应用到产品</label>
-        <div id="test-apply-target" style="display:flex;flex-direction:column;gap:8px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg2);max-height:180px;overflow:auto;">
-          <label class="check-row" style="margin:0;"><input type="checkbox" value="claude-code" checked><span>Claude Code</span></label>
-          <label class="check-row" style="margin:0;"><input type="checkbox" value="claude-desktop" checked><span>Claude Desktop</span></label>
-          <label class="check-row" style="margin:0;"><input type="checkbox" value="codex-cli" checked><span>Codex CLI</span></label>
-          <label class="check-row" style="margin:0;"><input type="checkbox" value="codex-desktop" checked><span>Codex Desktop</span></label>
-        </div>
-      </div>
-      <div class="form-group" style="justify-content:flex-end;">
-        <label class="check-row" style="margin:0 0 8px;">
-          <input type="checkbox" id="test-apply-restart">
-          <span>应用后自动重启相关客户端</span>
-        </label>
-        <button class="btn btn-primary btn-sm" onclick="applyRelayToSelectedProducts()">&#x1f4be; 创建并应用新配置</button>
-        <div style="font-size:11px;color:var(--text2);margin-top:8px;">会为所选产品新建配置并切换到新配置，不覆盖已有配置。</div>
-      </div>
-    </div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-      <button class="btn btn-outline btn-sm" onclick="testRelayConnection()">&#x1f50c; 测试连接</button>
-      <button class="btn btn-outline btn-sm" onclick="testRelayFetchModels()">&#x1f4e6; 获取模型列表</button>
-      <span id="test-status" style="font-size:12px;color:var(--text2);"></span>
-    </div>
-    <div class="model-list" id="test-models-list" style="margin-top:12px;"></div>
   </div>
 
   <!-- Proxy Control Card -->
@@ -2028,16 +1994,141 @@ async function applyBaseUrlKeyToTargets(baseUrl, apiKey, targets) {
   await loadState();
   if (applied.length) toast('已创建并应用新配置：' + applied.join('、'));
   if (failed.length) toast('部分产品失败：' + failed.join('；'), 'error');
+  return { applied, failed };
+}
+
+function getSyncRelayFields() {
+  const baseUrl = normalizeRelayBaseUrl(getVal('sync-base-url'));
+  const apiKey = (getVal('sync-api-key') || '').trim();
+  setVal('sync-base-url', baseUrl);
+  setVal('sync-api-key', apiKey);
+  return { baseUrl, apiKey };
+}
+
+async function fetchSyncRelayModels(baseUrl, apiKey) {
+  const params = new URLSearchParams({ baseUrl, apiKey });
+  const res = await fetch('/api/models?' + params.toString());
+  return res.json();
+}
+
+function renderSyncModels(models, total) {
+  const list = document.getElementById('sync-models-list');
+  if (!list) return;
+  if (!Array.isArray(models) || !models.length) {
+    list.innerHTML = '';
+    return;
+  }
+  list.innerHTML = '<h3 style="margin-bottom:8px;">已检测到模型 (' + total + ')</h3>' +
+    models.slice(0, 20).map(m => '<div class="model-item"><span class="model-id">' + esc(String(m.id)) + '</span><span class="model-owner">' + esc(String(m.owned_by || '')) + '</span></div>').join('');
+}
+
+async function checkRelayConnectivity(baseUrl, apiKey) {
+  // 中文注释：一键同步前先复用模型列表接口做连通性检测，避免把明显不可用的中转站写入客户端。
+  const status = document.getElementById('sync-test-status');
+  const list = document.getElementById('sync-models-list');
+  if (status) status.innerHTML = '<span class="loading"></span> 正在检测中转站连通性...';
+  if (list) list.innerHTML = '';
+
+  try {
+    const data = await fetchSyncRelayModels(baseUrl, apiKey);
+    const models = Array.isArray(data.models) ? data.models : [];
+    const total = Number(data.total || models.length || 0);
+
+    if (data.success) {
+      if (status) {
+        const text = total > 0
+          ? '连接成功，可用模型 ' + total + ' 个，继续同步配置'
+          : '连接成功，但未返回模型列表，继续同步配置';
+        status.innerHTML = '<span style="color:var(--green);">&#x2705; ' + text + '</span>';
+      }
+      renderSyncModels(models, total);
+      return data;
+    }
+
+    if (status) {
+      status.innerHTML = '<span style="color:var(--red);">&#x274c; 连通性检测失败：' + esc(data.error || '响应异常') + '</span>';
+    }
+    return null;
+  } catch (e) {
+    if (status) {
+      status.innerHTML = '<span style="color:var(--red);">&#x274c; 连通性检测失败：' + esc(e.message) + '</span>';
+    }
+    return null;
+  }
+}
+
+async function testSyncRelayConnection() {
+  const { baseUrl, apiKey } = getSyncRelayFields();
+  if (!baseUrl) { toast('请输入 Base URL', 'error'); return; }
+  if (!apiKey) { toast('请输入 API Key', 'error'); return; }
+  const result = await checkRelayConnectivity(baseUrl, apiKey);
+  toast(result ? '连接测试完成' : '连接测试失败', result ? 'success' : 'error');
+}
+
+async function testSyncRealMessage() {
+  const { baseUrl, apiKey } = getSyncRelayFields();
+  const status = document.getElementById('sync-test-status');
+  if (!baseUrl) { toast('请输入 Base URL', 'error'); return; }
+  if (!apiKey) { toast('请输入 API Key', 'error'); return; }
+  if (status) status.innerHTML = '<span class="loading"></span> 正在发起真实对话自测...';
+
+  let model = '';
+  try {
+    const modelData = await fetchSyncRelayModels(baseUrl, apiKey);
+    const models = Array.isArray(modelData.models) ? modelData.models : [];
+    if (modelData.success && models.length) {
+      model = String(models[0].id || '');
+      renderSyncModels(models, Number(modelData.total || models.length || 0));
+    }
+  } catch (e) { /* 模型列表失败时继续用默认 Claude 模型探测真实对话接口 */ }
+
+  try {
+    const params = new URLSearchParams({ baseUrl, apiKey });
+    if (model) params.set('model', model);
+    const res = await fetch('/api/test-message?' + params.toString());
+    const data = await res.json();
+    if (data.success) {
+      const parts = [
+        '真实对话调用成功',
+        data.status ? 'HTTP ' + data.status : '',
+        '模型 ' + esc(data.model || model || '默认'),
+        typeof data.duration_ms === 'number' ? data.duration_ms + 'ms' : '',
+      ].filter(Boolean).join('，');
+      if (status) status.innerHTML = '<span style="color:var(--green);">&#x2705; ' + parts + '</span>';
+      if (Array.isArray(data.modelsList) && data.modelsList.length) {
+        renderSyncModels(data.modelsList.map(id => ({ id, owned_by: '' })), data.modelsDetected || data.modelsList.length);
+      }
+      toast('真实对话自测通过');
+      return;
+    }
+
+    let html = '<span style="color:var(--red);">&#x274c; 真实对话自测失败' + (data.status ? '（HTTP ' + data.status + '）' : '') + '：' + esc(data.error || '未知错误') + '</span>';
+    if (data.hint) html += '<br><span style="color:var(--yellow);">&#x1f4a1; 排查方向：' + esc(data.hint) + '</span>';
+    if (status) status.innerHTML = html;
+    toast('真实对话自测失败', 'error');
+  } catch (e) {
+    if (status) status.innerHTML = '<span style="color:var(--red);">&#x274c; 真实对话自测请求失败：' + esc(e.message) + '</span>';
+    toast('真实对话自测请求失败', 'error');
+  }
 }
 
 async function applySyncToSelectedProducts() {
-  const baseUrl = normalizeRelayBaseUrl(getVal('sync-base-url'));
-  const apiKey = (getVal('sync-api-key') || '').trim();
+  const { baseUrl, apiKey } = getSyncRelayFields();
   const targets = getSelectedSyncTargets();
   if (!baseUrl) { toast('请输入 Base URL', 'error'); return; }
+  if (!apiKey) { toast('请输入 API Key', 'error'); return; }
   if (!targets.length) { toast('请至少选择一个产品', 'error'); return; }
-  setVal('sync-base-url', baseUrl);
-  await applyBaseUrlKeyToTargets(baseUrl, apiKey, targets);
+  const connected = await checkRelayConnectivity(baseUrl, apiKey);
+  if (!connected) {
+    toast('连通性检测失败，已停止同步', 'error');
+    return;
+  }
+  const result = await applyBaseUrlKeyToTargets(baseUrl, apiKey, targets);
+  if (document.getElementById('sync-apply-restart')?.checked) {
+    const applied = result && Array.isArray(result.applied) ? result.applied : [];
+    if (targets.includes('claude-desktop') && applied.includes('Claude Desktop')) await restartApp('claude-desktop');
+    if (targets.includes('codex-desktop') && applied.includes('Codex Desktop')) await restartApp('codex-desktop');
+  }
 }
 async function saveClaudeCode() {
   // Optionally append [1m] to all model fields
@@ -2932,35 +3023,6 @@ function normalizeRelayBaseUrl(value) {
   return v;
 }
 
-function getSelectedRelayTargets() {
-  const root = document.getElementById('test-apply-target');
-  if (!root) return [];
-  return Array.from(root.querySelectorAll('input[type="checkbox"]:checked')).map(el => el.value).filter(Boolean);
-}
-
-function fillRelayTestFields() {
-  const baseUrl = normalizeRelayBaseUrl(getVal('test-base-url'));
-  const apiKey = (getVal('test-api-key') || '').trim();
-  setVal('test-base-url', baseUrl);
-  setVal('test-api-key', apiKey);
-  return { baseUrl, apiKey };
-}
-
-async function applyRelayToSelectedProducts() {
-  const { baseUrl, apiKey } = fillRelayTestFields();
-  const targets = getSelectedRelayTargets();
-  if (!baseUrl) { toast('请先填写 Base URL', 'error'); return; }
-  if (targets.length === 0) { toast('请先选择至少一个目标产品', 'error'); return; }
-  if (!apiKey) { toast('请先填写 API Key', 'error'); return; }
-  await applyBaseUrlKeyToTargets(baseUrl, apiKey, targets);
-
-  const hasDesktopTarget = targets.includes('claude-desktop') || targets.includes('codex-desktop');
-  if (hasDesktopTarget && document.getElementById('test-apply-restart')?.checked) {
-    if (targets.includes('claude-desktop')) await restartApp('claude-desktop');
-    if (targets.includes('codex-desktop')) await restartApp('codex-desktop');
-  }
-}
-
 // ========== PROXY ==========
 async function proxyRefreshStatus() {
   try {
@@ -3020,62 +3082,6 @@ mountGatewayIntoClaudeDesktop();
 loadState();
 loadGateway();
 loadAutostart();
-
-// ========== RELAY CONNECTIVITY TEST ==========
-async function testRelayConnection() {
-  const baseUrl = getVal('test-base-url');
-  const apiKey = getVal('test-api-key');
-  const status = document.getElementById('test-status');
-  if (!baseUrl || !apiKey) {
-    status.innerHTML = '<span style="color:var(--red);">&#x274c; 请填写 Base URL 和 API Key</span>';
-    return;
-  }
-  status.innerHTML = '<span class="loading"></span> 测试中...';
-  try {
-    const params = new URLSearchParams({ baseUrl, apiKey });
-    const res = await fetch('/api/models?' + params);
-    const data = await res.json();
-    if (data.success && data.total > 0) {
-      status.innerHTML = '<span style="color:var(--green);">&#x2705; 连接成功，可用模型 ' + data.total + ' 个</span>';
-    } else if (data.error && /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|fetch failed|reset|bad_response/i.test(data.error)) {
-      status.innerHTML = '<span style="color:var(--red);">&#x274c; 无法连接：' + esc(data.error) + '（检查地址是否正确、是否需要代理）</span>';
-    } else if (data.error && /401|Invalid token|未授权|unauthorized|额度已用完/i.test(data.error)) {
-      status.innerHTML = '<span style="color:var(--yellow);">&#x26a0; 地址可达但 API Key 无效或额度已用完：' + esc(data.error) + '</span>';
-    } else {
-      status.innerHTML = '<span style="color:var(--yellow);">&#x26a0; ' + esc(data.error || '响应异常') + '</span>';
-    }
-    document.getElementById('test-models-list').innerHTML = '';
-  } catch (e) {
-    status.innerHTML = '<span style="color:var(--red);">&#x274c; 请求失败：' + esc(e.message) + '</span>';
-  }
-}
-
-async function testRelayFetchModels() {
-  const baseUrl = getVal('test-base-url');
-  const apiKey = getVal('test-api-key');
-  const status = document.getElementById('test-status');
-  const list = document.getElementById('test-models-list');
-  if (!baseUrl || !apiKey) {
-    status.innerHTML = '<span style="color:var(--red);">&#x274c; 请填写 Base URL 和 API Key</span>';
-    return;
-  }
-  status.innerHTML = '<span class="loading"></span> 获取中...';
-  list.innerHTML = '';
-  try {
-    const params = new URLSearchParams({ baseUrl, apiKey });
-    const res = await fetch('/api/models?' + params);
-    const data = await res.json();
-    if (data.success) {
-      status.innerHTML = '<span style="color:var(--green);">&#x2705; 获取到 ' + data.total + ' 个模型</span>';
-      list.innerHTML = '<h3 style="margin-bottom:8px;">可用模型 (' + data.total + ')</h3>' +
-        data.models.map(m => '<div class="model-item"><span class="model-id">' + esc(String(m.id)) + '</span><span class="model-owner">' + esc(String(m.owned_by||'')) + '</span><button class="copy-btn" onclick="copyToClipboard(\'' + esc(String(m.id)) + '\')" title="复制模型 ID">&#x1f4cb;</button></div>').join('');
-    } else {
-      status.innerHTML = '<span style="color:var(--red);">&#x274c; ' + esc(data.error || '获取失败') + '</span>';
-    }
-  } catch (e) {
-    status.innerHTML = '<span style="color:var(--red);">&#x274c; 请求失败：' + esc(e.message) + '</span>';
-  }
-}
 
 // ========== RELAY GATEWAY ==========
 let gwRoutes = []; // array of {anthropic, backend}
